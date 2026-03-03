@@ -62,37 +62,40 @@ pub fn init_packed_layers() -> Option<PathBuf> {
         return None;
     }
 
-    // Mount virtiofs
-    let status = Command::new("mount")
-        .args(["-t", "virtiofs", tag])
-        .arg(&mount_point)
-        .status();
+    // Mount virtiofs using direct syscall (avoids ~3-5ms fork+exec overhead)
+    let src = std::ffi::CString::new(tag).ok()?;
+    let dst = std::ffi::CString::new(mount_point.to_str()?).ok()?;
+    let fstype = std::ffi::CString::new("virtiofs").unwrap();
+    // SAFETY: mount virtiofs with valid CString arguments
+    let rc = unsafe {
+        libc::mount(
+            src.as_ptr(),
+            dst.as_ptr(),
+            fstype.as_ptr(),
+            0,
+            std::ptr::null(),
+        )
+    };
 
-    match status {
-        Ok(s) if s.success() => {
-            info!(mount_point = %mount_point.display(), "packed layers mounted successfully");
-
-            // List contents for debugging
-            if let Ok(entries) = std::fs::read_dir(&mount_point) {
-                let layer_dirs: Vec<_> = entries
-                    .filter_map(|e| e.ok())
-                    .filter(|e| e.path().is_dir())
-                    .map(|e| e.file_name().to_string_lossy().to_string())
-                    .collect();
-                info!(layer_count = layer_dirs.len(), layers = ?layer_dirs, "packed layers available");
-            }
-
-            Some(mount_point)
-        }
-        Ok(s) => {
-            warn!(exit_code = ?s.code(), tag = %tag, "failed to mount packed layers virtiofs");
-            None
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to run mount command for packed layers");
-            None
-        }
+    if rc != 0 {
+        let err = std::io::Error::last_os_error();
+        warn!(error = %err, tag = %tag, "failed to mount packed layers virtiofs");
+        return None;
     }
+
+    info!(mount_point = %mount_point.display(), "packed layers mounted successfully");
+
+    // List contents for debugging (only at debug level to avoid boot overhead)
+    if let Ok(entries) = std::fs::read_dir(&mount_point) {
+        let layer_dirs: Vec<_> = entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        debug!(layer_count = layer_dirs.len(), layers = ?layer_dirs, "packed layers available");
+    }
+
+    Some(mount_point)
 }
 
 /// Get the packed layers directory if available.
@@ -525,6 +528,10 @@ fn is_layer_cached(layer_dir: &Path) -> bool {
 ///
 /// This function ensures all required storage directories exist and are accessible.
 /// Returns early (successfully) if storage hasn't been formatted yet.
+///
+/// Note: `mount_storage_disk()` already creates all directories, so this is
+/// not called during boot. Kept for manual validation/repair use cases.
+#[allow(dead_code)]
 pub fn init() -> Result<()> {
     let root = Path::new(STORAGE_ROOT);
 
@@ -1696,15 +1703,27 @@ fn setup_volume_mounts(rootfs: &str, mounts: &[(String, String, bool)]) -> Resul
         if !is_mountpoint(&virtiofs_mount) {
             info!(tag = %tag, mount_point = %virtiofs_mount.display(), "mounting virtiofs");
 
-            // Mount virtiofs with sync option to ensure writes are persisted immediately
-            // Note: cache=none is not supported by libkrunfw's kernel, use sync instead
-            let status = Command::new("mount")
-                .args(["-t", "virtiofs", "-o", "sync", tag])
-                .arg(&virtiofs_mount)
-                .status()?;
-
-            if !status.success() {
-                warn!(tag = %tag, "failed to mount virtiofs device");
+            // Mount virtiofs using direct syscall (avoids ~3-5ms fork+exec overhead).
+            // Use sync option to ensure writes are persisted immediately.
+            let src = std::ffi::CString::new(tag.as_str())
+                .map_err(|e| StorageError::Internal { message: format!("invalid tag: {}", e) })?;
+            let dst = std::ffi::CString::new(virtiofs_mount.to_string_lossy().as_ref())
+                .map_err(|e| StorageError::Internal { message: format!("invalid mount point: {}", e) })?;
+            let fstype = std::ffi::CString::new("virtiofs").unwrap();
+            let opts = std::ffi::CString::new("sync").unwrap();
+            // SAFETY: mount virtiofs with valid CString arguments
+            let rc = unsafe {
+                libc::mount(
+                    src.as_ptr(),
+                    dst.as_ptr(),
+                    fstype.as_ptr(),
+                    0,
+                    opts.as_ptr() as *const libc::c_void,
+                )
+            };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                warn!(error = %err, tag = %tag, "failed to mount virtiofs device");
                 continue;
             }
         }
@@ -1722,20 +1741,39 @@ fn setup_volume_mounts(rootfs: &str, mounts: &[(String, String, bool)]) -> Resul
                 "bind-mounting into container"
             );
 
-            let args = ["--bind", &virtiofs_mount.to_string_lossy(), &target_path];
-
-            let status = Command::new("mount").args(args).status()?;
-
-            if !status.success() {
-                warn!(target = %target_path, "failed to bind-mount");
+            // Bind mount using direct syscall
+            let bind_src = std::ffi::CString::new(virtiofs_mount.to_string_lossy().as_ref())
+                .map_err(|e| StorageError::Internal { message: format!("invalid source: {}", e) })?;
+            let bind_dst = std::ffi::CString::new(target_path.as_str())
+                .map_err(|e| StorageError::Internal { message: format!("invalid target: {}", e) })?;
+            // SAFETY: bind mount with MS_BIND flag
+            let rc = unsafe {
+                libc::mount(
+                    bind_src.as_ptr(),
+                    bind_dst.as_ptr(),
+                    std::ptr::null(),
+                    libc::MS_BIND,
+                    std::ptr::null(),
+                )
+            };
+            if rc != 0 {
+                let err = std::io::Error::last_os_error();
+                warn!(error = %err, target = %target_path, "failed to bind-mount");
                 continue;
             }
 
             // Remount read-only if requested
             if *read_only {
-                let _ = Command::new("mount")
-                    .args(["-o", "remount,ro,bind", &target_path])
-                    .status();
+                // SAFETY: remount with MS_BIND|MS_RDONLY|MS_REMOUNT
+                unsafe {
+                    libc::mount(
+                        std::ptr::null(),
+                        bind_dst.as_ptr(),
+                        std::ptr::null(),
+                        libc::MS_BIND | libc::MS_REMOUNT | libc::MS_RDONLY,
+                        std::ptr::null(),
+                    );
+                }
             }
         }
 
