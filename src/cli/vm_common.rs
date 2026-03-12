@@ -10,7 +10,7 @@ use crate::cli::{format_pid_suffix, truncate};
 use smolvm::agent::{vm_data_dir, AgentManager, PortMapping};
 use smolvm::config::{RecordState, SmolvmConfig, VmRecord};
 use smolvm::db::SmolvmDb;
-use smolvm::storage::{DEFAULT_OVERLAY_SIZE_GB, DEFAULT_STORAGE_SIZE_GB};
+use smolvm::storage::{DEFAULT_OVERLAY_SIZE_GIB, DEFAULT_STORAGE_SIZE_GIB};
 
 // ============================================================================
 // VmKind
@@ -769,8 +769,8 @@ pub fn list_vms(kind: VmKind, verbose: bool, json: bool) -> smolvm::Result<()> {
 
         for (name, record) in vms {
             let actual_state = record.actual_state();
-            let storage_gb = record.storage_gb.unwrap_or(DEFAULT_STORAGE_SIZE_GB);
-            let overlay_gb = record.overlay_gb.unwrap_or(DEFAULT_OVERLAY_SIZE_GB);
+            let storage_gb = record.storage_gb.unwrap_or(DEFAULT_STORAGE_SIZE_GIB);
+            let overlay_gb = record.overlay_gb.unwrap_or(DEFAULT_OVERLAY_SIZE_GIB);
             println!(
                 "{:<20} {:<10} {:>5} {:>10} {:>7} {:>7} {:>8} {:>8}",
                 truncate(name, 18),
