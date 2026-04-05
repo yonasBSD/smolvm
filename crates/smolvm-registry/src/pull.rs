@@ -99,7 +99,13 @@ pub async fn pull(
     // 5. Verify digest.
     let actual = format!("sha256:{}", hex::encode(hasher.finalize()));
     if actual != *digest {
-        let _ = tokio::fs::remove_file(&partial_path).await;
+        if let Err(e) = tokio::fs::remove_file(&partial_path).await {
+            tracing::warn!(
+                error = %e,
+                path = %partial_path.display(),
+                "failed to clean up partial blob after digest mismatch"
+            );
+        }
         return Err(RegistryError::DigestMismatch {
             expected: digest.to_string(),
             actual,

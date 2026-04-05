@@ -11,6 +11,18 @@ use crate::{RegistryError, Result, MANIFEST_MEDIA_TYPE};
 use reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
 use sha2::{Digest, Sha256};
 
+/// Validate that a digest string matches the expected `sha256:<64 hex chars>` format.
+pub(crate) fn validate_digest(digest: &str) -> Result<()> {
+    if let Some(hex_part) = digest.strip_prefix("sha256:") {
+        if hex_part.len() == 64 && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Ok(());
+        }
+    }
+    Err(RegistryError::InvalidManifest(format!(
+        "invalid digest format: {digest}"
+    )))
+}
+
 /// HTTP client for an OCI Distribution registry.
 pub struct RegistryClient {
     http: reqwest::Client,
@@ -51,6 +63,7 @@ impl RegistryClient {
 
     /// Check if a blob exists. Returns true if HEAD returns 200.
     pub async fn blob_exists(&self, repo: &str, digest: &str) -> Result<bool> {
+        validate_digest(digest)?;
         let url = format!("{}/v2/{}/blobs/{}", self.base_url, repo, digest);
         let resp = self.request(reqwest::Method::HEAD, &url).send().await?;
         Ok(resp.status() == reqwest::StatusCode::OK)
@@ -94,12 +107,8 @@ impl RegistryClient {
             })?
             .to_string();
 
-        // Resolve relative Location against base URL.
-        let put_url = if location.starts_with("http") {
-            location
-        } else {
-            format!("{}{}", self.base_url, location)
-        };
+        // Resolve Location — validates same-origin for absolute URLs.
+        let put_url = self.resolve_location(&location)?;
 
         // Step 2: PUT the blob data with digest.
         let separator = if put_url.contains('?') { "&" } else { "?" };
@@ -128,6 +137,7 @@ impl RegistryClient {
     /// NOTE: buffers entire blob in memory. For large artifacts, switch to
     /// streaming to disk with digest verification via `AsyncRead`.
     pub async fn pull_blob(&self, repo: &str, digest: &str) -> Result<Vec<u8>> {
+        validate_digest(digest)?;
         let url = format!("{}/v2/{}/blobs/{}", self.base_url, repo, digest);
         let resp = self.request(reqwest::Method::GET, &url).send().await?;
 
@@ -167,6 +177,8 @@ impl RegistryClient {
         size: u64,
         body: reqwest::Body,
     ) -> Result<()> {
+        validate_digest(digest)?;
+
         // Skip if already present.
         if self.blob_exists(repo, digest).await? {
             tracing::debug!(digest = %digest, "blob already exists, skipping upload");
@@ -198,11 +210,8 @@ impl RegistryClient {
             })?
             .to_string();
 
-        let put_url = if location.starts_with("http") {
-            location
-        } else {
-            format!("{}{}", self.base_url, location)
-        };
+        // Resolve Location — validates same-origin for absolute URLs.
+        let put_url = self.resolve_location(&location)?;
 
         let separator = if put_url.contains('?') { "&" } else { "?" };
         let put_url = format!("{}{}digest={}", put_url, separator, digest);
@@ -237,6 +246,7 @@ impl RegistryClient {
         repo: &str,
         digest: &str,
     ) -> Result<impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>>> {
+        validate_digest(digest)?;
         let url = format!("{}/v2/{}/blobs/{}", self.base_url, repo, digest);
         let resp = self.request(reqwest::Method::GET, &url).send().await?;
 
@@ -299,6 +309,41 @@ impl RegistryClient {
         Ok(resp.bytes().await?.to_vec())
     }
 
+    /// Resolve a Location header value against the base URL.
+    ///
+    /// Relative paths are joined to base_url. Absolute URLs are validated
+    /// to ensure they point to the same registry host (prevents SSRF via
+    /// malicious registry redirects).
+    fn resolve_location(&self, location: &str) -> Result<String> {
+        if location.starts_with("http") {
+            // Absolute URL — validate same origin.
+            // Extract host from both URLs for comparison.
+            let loc_host = location
+                .split("//")
+                .nth(1)
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("");
+            let base_host = self
+                .base_url
+                .split("//")
+                .nth(1)
+                .and_then(|s| s.split('/').next())
+                .unwrap_or("");
+
+            if loc_host != base_host {
+                return Err(RegistryError::ApiError {
+                    status: 202,
+                    body: format!(
+                        "Location header points to different host ({loc_host}), expected {base_host}"
+                    ),
+                });
+            }
+            Ok(location.to_string())
+        } else {
+            Ok(format!("{}{}", self.base_url, location))
+        }
+    }
+
     /// Build a request with optional auth header.
     fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
         let mut req = self.http.request(method, url);
@@ -306,5 +351,95 @@ impl RegistryClient {
             req = req.bearer_auth(token);
         }
         req
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_digest_accepts_valid_sha256() {
+        let valid = "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        assert!(validate_digest(valid).is_ok());
+        // Uppercase hex is also accepted
+        let upper = "sha256:ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+        assert!(validate_digest(upper).is_ok());
+    }
+
+    #[test]
+    fn validate_digest_rejects_invalid() {
+        // Wrong/missing prefix
+        assert!(validate_digest("").is_err());
+        assert!(validate_digest("sha256:").is_err());
+        assert!(validate_digest(
+            "sha512:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        )
+        .is_err());
+        assert!(validate_digest(
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        )
+        .is_err());
+        // Wrong length
+        assert!(validate_digest("sha256:abcdef").is_err());
+        assert!(validate_digest(
+            "sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef01234567890"
+        )
+        .is_err());
+        // Non-hex chars
+        assert!(validate_digest(
+            "sha256:gggggg0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        )
+        .is_err());
+    }
+
+    fn client(base: &str) -> RegistryClient {
+        RegistryClient::new(base.to_string())
+    }
+
+    #[test]
+    fn resolve_location_allows_relative_and_same_host() {
+        let c = client("https://registry.example.com");
+        // Relative path
+        let r = c
+            .resolve_location("/v2/repo/blobs/uploads/abc?state=xyz")
+            .unwrap();
+        assert_eq!(
+            r,
+            "https://registry.example.com/v2/repo/blobs/uploads/abc?state=xyz"
+        );
+        // Absolute same host
+        let r = c
+            .resolve_location("https://registry.example.com/v2/uploads/abc")
+            .unwrap();
+        assert_eq!(r, "https://registry.example.com/v2/uploads/abc");
+        // Absolute same host with port
+        let c2 = client("http://localhost:5050");
+        let r = c2
+            .resolve_location("http://localhost:5050/v2/uploads/xyz")
+            .unwrap();
+        assert_eq!(r, "http://localhost:5050/v2/uploads/xyz");
+    }
+
+    #[test]
+    fn resolve_location_blocks_different_host() {
+        let c = client("https://registry.example.com");
+        // Different host
+        assert!(c
+            .resolve_location("https://evil.attacker.com/steal-data")
+            .is_err());
+        // Same host but different port (different origin)
+        let c2 = client("http://localhost:5050");
+        assert!(c2
+            .resolve_location("http://localhost:9999/v2/uploads/xyz")
+            .is_err());
+    }
+
+    #[test]
+    fn client_auth_token() {
+        let c = RegistryClient::new("https://r.example.com".to_string());
+        assert!(c.auth_token.is_none());
+        let c = c.with_token("secret".to_string());
+        assert_eq!(c.auth_token.as_deref(), Some("secret"));
     }
 }
