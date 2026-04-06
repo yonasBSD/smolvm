@@ -44,7 +44,7 @@ use state::ApiState;
 #[openapi(
     info(
         title = "smolvm API",
-        version = "0.5.1",
+        version = "0.5.2",
         description = "smolvm API for managing machines and images.",
         license(name = "Apache-2.0", url = "https://www.apache.org/licenses/LICENSE-2.0")
     ),
