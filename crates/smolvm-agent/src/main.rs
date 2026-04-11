@@ -15,9 +15,36 @@ use smolvm_protocol::{
 use std::io::{Read, Write};
 use std::os::unix::io::AsRawFd;
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use tracing::{debug, error, info, warn};
 
 mod crun;
+
+/// Ensures storage disk is mounted exactly once. The mount happens either during
+/// deferred init (the common case) or on the first request that needs storage
+/// (if a request arrives before deferred init reaches the mount step).
+/// This eliminates the race between early ready signaling and storage access.
+static STORAGE_MOUNTED: OnceLock<bool> = OnceLock::new();
+
+fn ensure_storage_mounted() -> bool {
+    *STORAGE_MOUNTED.get_or_init(|| {
+        let t0 = uptime_ms();
+        let ok = mount_storage_disk();
+        // Log after tracing may or may not be initialized — use boot_log for safety.
+        if ok {
+            boot_log(
+                "INFO",
+                &format!("storage disk mounted (duration_ms={})", uptime_ms() - t0),
+            );
+        } else {
+            boot_log(
+                "ERROR",
+                "storage disk NOT mounted — image pulls and container overlays will fail",
+            );
+        }
+        ok
+    })
+}
 
 /// Format a structured JSON log line for early boot (before tracing is up).
 fn format_boot_log(level: &str, msg: &str) -> String {
@@ -107,11 +134,22 @@ fn main() {
         }
     };
 
+    // Set up signal handlers for graceful shutdown (sync before exit)
+    setup_signal_handlers();
+
+    // Signal readiness to host IMMEDIATELY after vsock listener is active.
+    // The host detects this marker, then connects and sends its first request.
+    // That connection takes ~10-30ms, giving us time to finish deferred init
+    // below before the first request arrives.
+    signal_ready_to_host();
+
+    // --- Deferred init: runs while host is detecting marker + connecting ---
+    // Storage mount is behind a OnceLock (ensure_storage_mounted) so it
+    // happens exactly once — either here or on first storage-dependent request.
+
     let start_uptime = uptime_ms();
 
-    // Initialize logging (after vsock listener is ready).
-    // JSON format for machine consumption (agent-console.log is read by host).
-    // Default level: info — captures lifecycle events without debug noise.
+    // Initialize logging (deferred past ready signal — uses boot_log before this).
     tracing_subscriber::fmt()
         .json()
         .with_env_filter(
@@ -126,19 +164,9 @@ fn main() {
         "smolvm-agent started, vsock listener already ready"
     );
 
-    // Set up signal handlers for graceful shutdown (sync before exit)
-    setup_signal_handlers();
-
-    // Mount storage disk (moved from init script for faster vsock availability)
-    let t0 = uptime_ms();
-    if mount_storage_disk() {
-        info!(duration_ms = uptime_ms() - t0, "storage disk mounted");
-    } else {
-        error!(
-            duration_ms = uptime_ms() - t0,
-            "storage disk NOT mounted — image pulls and container overlays will fail"
-        );
-    }
+    // Mount storage disk eagerly during deferred init. If a request arrives
+    // before this point, ensure_storage_mounted() handles the mount on demand.
+    ensure_storage_mounted();
 
     // Initialize packed layers support (if SMOLVM_PACKED_LAYERS env var is set)
     let t0 = uptime_ms();
@@ -183,13 +211,8 @@ fn main() {
     info!(
         total_startup_ms = uptime_ms() - start_uptime,
         uptime_ms = uptime_ms(),
-        "agent startup complete, entering accept loop"
+        "agent init complete, entering accept loop"
     );
-
-    // Signal readiness to host via virtiofs marker file.
-    // The host watches for this file instead of the vsock socket (which appears
-    // before the agent is ready, causing wasted timeout on the first ping).
-    signal_ready_to_host();
 
     // Start accepting connections (listener already bound)
     if let Err(e) = run_server_with_listener(listener) {
@@ -478,7 +501,9 @@ fn setup_persistent_rootfs() {
             // Skip if filesystem already fills the device (subsequent boots).
             // If resize fails (e.g. macOS-created template with incompatible features),
             // skip mount — mount_storage_disk() will handle mkfs fallback.
-            if !ext4_already_full_size(STORAGE_DEVICE) && !resize_ext4_if_needed(STORAGE_DEVICE, "storage") {
+            if !ext4_already_full_size(STORAGE_DEVICE)
+                && !resize_ext4_if_needed(STORAGE_DEVICE, "storage")
+            {
                 boot_log(
                     "WARN",
                     "storage: resize failed, deferring to mount_storage_disk",
@@ -734,18 +759,29 @@ fn resize_ext4_if_needed(device: &str, label: &str) -> bool {
         Ok(output) if output.status.success() => {
             let msg = String::from_utf8_lossy(&output.stderr);
             if msg.contains("Nothing to do") {
-                boot_log("DEBUG", &format!("{} filesystem already at full device size", label));
+                boot_log(
+                    "DEBUG",
+                    &format!("{} filesystem already at full device size", label),
+                );
             } else {
-                boot_log("INFO", &format!("{} filesystem resized to fill block device", label));
+                boot_log(
+                    "INFO",
+                    &format!("{} filesystem resized to fill block device", label),
+                );
             }
             return true;
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            boot_log("WARN", &format!(
-                "{} resize2fs failed (exit {}): {}, trying e2fsck",
-                label, output.status.code().unwrap_or(-1), stderr.trim()
-            ));
+            boot_log(
+                "WARN",
+                &format!(
+                    "{} resize2fs failed (exit {}): {}, trying e2fsck",
+                    label,
+                    output.status.code().unwrap_or(-1),
+                    stderr.trim()
+                ),
+            );
         }
         Err(e) => {
             boot_log("WARN", &format!("{} resize2fs not found: {}", label, e));
@@ -759,18 +795,27 @@ fn resize_ext4_if_needed(device: &str, label: &str) -> bool {
     match Command::new("e2fsck").args(["-y", device]).output() {
         Ok(output) => {
             let code = output.status.code().unwrap_or(-1);
-            // e2fsck exit codes:
-            //   0 = clean, 1 = errors fixed, 2 = errors fixed + reboot needed
-            //   4 = errors left uncorrected, 8 = operational error
-            if code >= 4 {
+            // e2fsck exit codes (bit flags, may be OR'd together):
+            //   0 = clean
+            //   1 = errors corrected
+            //   2 = errors corrected, reboot needed (unsafe to proceed)
+            //   4 = errors left uncorrected
+            //   8 = operational error
+            if code >= 2 {
                 let stderr = String::from_utf8_lossy(&output.stderr);
-                boot_log("WARN", &format!(
-                    "{} e2fsck could not repair (exit {}): {}", label, code, stderr.trim()
-                ));
+                boot_log(
+                    "WARN",
+                    &format!(
+                        "{} e2fsck could not fully repair (exit {}): {}",
+                        label,
+                        code,
+                        stderr.trim()
+                    ),
+                );
                 return false;
             }
-            if code > 0 {
-                boot_log("INFO", &format!("{} e2fsck fixed errors (exit {})", label, code));
+            if code == 1 {
+                boot_log("INFO", &format!("{} e2fsck fixed errors", label));
             }
         }
         Err(e) => {
@@ -782,15 +827,23 @@ fn resize_ext4_if_needed(device: &str, label: &str) -> bool {
     // Retry resize2fs after e2fsck
     match Command::new("resize2fs").arg(device).output() {
         Ok(output) if output.status.success() => {
-            boot_log("INFO", &format!("{} filesystem resized after e2fsck", label));
+            boot_log(
+                "INFO",
+                &format!("{} filesystem resized after e2fsck", label),
+            );
             true
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            boot_log("WARN", &format!(
-                "{} resize2fs still failed after e2fsck (exit {}): {}",
-                label, output.status.code().unwrap_or(-1), stderr.trim()
-            ));
+            boot_log(
+                "WARN",
+                &format!(
+                    "{} resize2fs still failed after e2fsck (exit {}): {}",
+                    label,
+                    output.status.code().unwrap_or(-1),
+                    stderr.trim()
+                ),
+            );
             false
         }
         Err(e) => {
@@ -934,7 +987,8 @@ fn mount_storage_disk() -> bool {
     }
 
     // --- Attempt 1: resize (if needed) + mount (works on subsequent boots) ---
-    let resized = ext4_already_full_size(STORAGE_DEVICE) || resize_ext4_if_needed(STORAGE_DEVICE, "storage");
+    let resized =
+        ext4_already_full_size(STORAGE_DEVICE) || resize_ext4_if_needed(STORAGE_DEVICE, "storage");
     if resized && try_mount_storage_ext4() {
         info!("storage disk mounted after resize");
         create_storage_dirs(STORAGE_MOUNT);
@@ -1176,6 +1230,18 @@ fn handle_connection(stream: &mut impl ReadWrite) -> Result<(), Box<dyn std::err
 
 /// Handle a single non-interactive request.
 fn handle_request(request: AgentRequest) -> AgentResponse {
+    // Ensure storage is mounted for operations that need it.
+    // Ping, NetworkTest, VmExec, and Shutdown don't access /storage.
+    match &request {
+        AgentRequest::Ping
+        | AgentRequest::NetworkTest { .. }
+        | AgentRequest::VmExec { .. }
+        | AgentRequest::Shutdown => {}
+        _ => {
+            ensure_storage_mounted();
+        }
+    }
+
     match request {
         AgentRequest::Ping => AgentResponse::Pong {
             version: PROTOCOL_VERSION,
@@ -1418,6 +1484,7 @@ fn handle_interactive_run(
     stream: &mut impl ReadWrite,
     request: AgentRequest,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_storage_mounted();
     let (image, command, env, workdir, mounts, timeout_ms, tty, persistent_overlay_id) =
         match request {
             AgentRequest::Run {
@@ -2381,6 +2448,7 @@ fn handle_streaming_pull<S: Read + Write>(
     oci_platform: Option<&str>,
     auth: Option<&RegistryAuth>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_storage_mounted();
     info!(
         image = %image,
         ?oci_platform,
@@ -2477,6 +2545,7 @@ fn handle_streaming_export_layer(
     image_digest: &str,
     layer_index: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    ensure_storage_mounted();
     info!(image_digest = %image_digest, layer_index = layer_index, "exporting layer (chunked)");
 
     // Export layer to tar file

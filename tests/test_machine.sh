@@ -1331,34 +1331,44 @@ test_agent_json_logs() {
     # Run a command to generate agent log entries
     $SMOLVM machine exec --name "$vm_name" -- echo "observability-test" 2>&1 || true
 
-    # Find the console log
+    # Find the console log using the platform-aware vm_data_dir helper
     local data_dir
     data_dir=$(vm_data_dir "$vm_name")
-    local console_log="${data_dir}/../agent-console.log"
+    local console_log="${data_dir}/agent-console.log"
 
-    # Try the runtime dir
-    local runtime_dir
-    runtime_dir=$(find /run/user/$(id -u)/smolvm/vms/"$vm_name" -name "agent-console.log" 2>/dev/null | head -1)
-    if [[ -z "$runtime_dir" ]]; then
-        runtime_dir=$(find "$HOME/.cache/smolvm" -path "*/$vm_name/agent-console.log" 2>/dev/null | head -1)
-    fi
+    # Copy the log before stopping (stop/delete may remove the data dir)
+    local saved_log
+    saved_log=$(mktemp)
+    cp "$console_log" "$saved_log" 2>/dev/null || true
 
     $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
     $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
 
-    if [[ -z "$runtime_dir" ]]; then
-        echo "Console log not found"
+    if [[ ! -s "$saved_log" ]]; then
+        echo "Console log not found or empty at $console_log"
+        rm -f "$saved_log"
         return 1
     fi
 
     # Agent should write JSON — verify at least one line parses as JSON
     local json_lines
-    json_lines=$(grep -c '^{' "$runtime_dir" 2>/dev/null || echo "0")
-    [[ "$json_lines" -gt 0 ]] || { echo "No JSON lines in console log ($runtime_dir)"; return 1; }
+    json_lines=$(grep -c '^{' "$saved_log" 2>/dev/null || echo "0")
+    if [[ "$json_lines" -eq 0 ]]; then
+        echo "No JSON lines in console log ($console_log)"
+        rm -f "$saved_log"
+        return 1
+    fi
 
-    # Verify a JSON line has expected structured fields
+    # Verify a tracing-formatted JSON line has expected structured fields.
+    # Skip early boot_log lines (target=smolvm_agent::boot) which use a
+    # simpler format without timestamps — they run before tracing is initialized.
     local first_json
-    first_json=$(grep '^{' "$runtime_dir" | head -1)
+    first_json=$(grep '^{' "$saved_log" | grep '"timestamp"' | head -1)
+    rm -f "$saved_log"
+    if [[ -z "$first_json" ]]; then
+        echo "No tracing JSON lines with timestamp found in console log"
+        return 1
+    fi
     echo "$first_json" | python3 -c "
 import sys, json
 line = json.load(sys.stdin)
