@@ -51,16 +51,16 @@ export interface PortSpec {
  * VM resource allocation.
  */
 export interface ResourceSpec {
-  /** Number of vCPUs (default: 1). */
+  /** Number of vCPUs (default: 4). */
   cpus?: number;
-  /** Memory in MiB (default: 512). */
+  /** Memory in MiB (default: 8192). */
   memoryMb?: number;
   /** Enable outbound network access (default: false). */
   network?: boolean;
   /** Storage disk size in GiB (default: 20). */
-  storageGb?: number;
+  storageGib?: number;
   /** Overlay disk size in GiB (default: 10). */
-  overlayGb?: number;
+  overlayGib?: number;
 }
 
 // ============================================================================
@@ -77,6 +77,14 @@ export interface ExecOptions {
   workdir?: string;
   /** Timeout in seconds. */
   timeout?: number;
+}
+
+/**
+ * Options for writing a file into the VM.
+ */
+export interface FileWriteOptions {
+  /** Optional octal file mode, for example `0o644`. */
+  mode?: number;
 }
 
 /**
@@ -105,4 +113,18 @@ export interface ImageInfo {
   architecture: string;
   /** Platform OS (e.g., "linux"). */
   os: string;
+}
+
+/**
+ * Event emitted by a streaming exec session.
+ */
+export interface ExecStreamEvent {
+  /** Event kind. */
+  kind: "stdout" | "stderr" | "exit" | "error";
+  /** Text payload for stdout/stderr events. */
+  data?: string;
+  /** Exit code for exit events. */
+  exitCode?: number;
+  /** Error message for error events. */
+  message?: string;
 }

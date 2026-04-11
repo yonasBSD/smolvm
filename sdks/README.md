@@ -54,18 +54,26 @@ Use the Node workspace for the main verification flow:
 ```bash
 cd sdks/node
 npm test
+npm run --workspace smolvm-embedded test:integration
 npm run smoke
 npm exec --workspace smolvm-embedded tsx examples/basic.ts
+npm exec --workspace smolvm-embedded tsx examples/create-and-start.ts
 ```
 
 - `npm test` rebuilds the current platform package and runs the
   `smolvm-embedded` Vitest suite.
+- `npm run --workspace smolvm-embedded test:integration` runs only the embedded
+  SDK integration tests under `sdks/node/smolvm-embedded/integration-tests/`.
 - `npm run smoke` performs the fresh-install validation from the PR by packing
   the public package plus the host platform package, installing them into a
   temporary project, and checking that the native binding loads correctly.
 - `npm exec --workspace smolvm-embedded tsx examples/basic.ts` runs the local
   integration example that exercises `quickExec`, container execution, managed
   machine lifecycle, and explicit machine cleanup.
+- `npm exec --workspace smolvm-embedded tsx examples/create-and-start.ts`
+  creates `created-by-node`, explicitly starts it, and intentionally leaves it
+  running so it can be inspected with `smolvm machine status --name
+  created-by-node` or `smolvm machine ls`.
 
 ### Manual Fresh-Install Check
 
@@ -128,4 +136,32 @@ Run the smoke program:
 ```bash
 cd "$TMP_PROJECT_DIR"
 npx tsx index.ts
+```
+
+Alternative `index.ts` that does not use `quickExec` and does not delete the VM:
+
+```ts
+import { Machine } from "smolvm-embedded";
+
+async function main() {
+  const machine = await Machine.create({
+    name: "created-by-node",
+    persistent: true,
+  });
+
+  console.log("created machine:", machine.name);
+  console.log("state before start:", machine.state);
+
+  await machine.start();
+
+  console.log("state after start:", machine.state);
+  console.log("is running:", machine.isRunning);
+  console.log("pid:", machine.pid ?? "unknown");
+  console.log("VM was not deleted.");
+}
+
+main().catch((err) => {
+  console.error(err);
+  process.exit(1);
+});
 ```
