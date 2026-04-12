@@ -139,6 +139,25 @@ test_machine_named_vm() {
     ensure_data_dir_deleted "$vm_name"
 }
 
+test_machine_create_prints_named_start_hint() {
+    local vm_name="create-hint-test-$$"
+    local output
+
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+
+    output=$($SMOLVM machine create "$vm_name" 2>&1) || return 1
+
+    [[ "$output" == *"Use 'smolvm machine start --name $vm_name' to start the machine"* ]] || {
+        echo "$output"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    $SMOLVM machine delete "$vm_name" -f 2>&1
+    ensure_data_dir_deleted "$vm_name"
+}
+
 # =============================================================================
 # Error Cases
 # =============================================================================
@@ -963,6 +982,7 @@ run_test "Machine start/stop cycle" test_machine_start_stop_cycle || true
 run_test "Machine exec" test_machine_exec || true
 run_test "Machine exec exit code" test_machine_exec_exit_code || true
 run_test "Named machine" test_machine_named_vm || true
+run_test "Create prints named start hint" test_machine_create_prints_named_start_hint || true
 run_test "Exec when stopped fails" test_machine_exec_when_stopped || true
 run_test "DB persistence across restart" test_db_persistence_across_restart || true
 run_test "DB VM state update" test_db_vm_state_update || true

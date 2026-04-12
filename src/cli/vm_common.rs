@@ -63,13 +63,17 @@ pub fn ensure_running_and_connect(
 ) -> smolvm::Result<(AgentManager, smolvm::agent::AgentClient)> {
     let manager = get_vm_manager(name)?;
     let label = vm_label(name);
+    let start_hint = match name {
+        Some(name) => format!("smolvm machine start --name {}", name),
+        None => "smolvm machine start".to_string(),
+    };
 
     if manager.try_connect_existing().is_none() {
         return Err(smolvm::Error::agent(
             "connect",
             format!(
-                "machine '{}' is not running. Use 'smolvm machine start' first.",
-                label
+                "machine '{}' is not running. Use '{}' first.",
+                label, start_hint
             ),
         ));
     }
@@ -211,7 +215,7 @@ pub fn create_vm(params: CreateVmParams) -> smolvm::Result<()> {
         println!("  Init commands: {}", params.init.len());
     }
     println!(
-        "\nUse 'smolvm machine start {}' to start the machine",
+        "\nUse 'smolvm machine start --name {}' to start the machine",
         params.name
     );
     println!(

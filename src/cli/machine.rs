@@ -793,8 +793,8 @@ impl ExecCmd {
 /// Create a named machine configuration.
 ///
 /// Creates a persistent VM configuration that can be started later.
-/// Use `smolvm machine start --name <name>` to start, then `smolvm container`
-/// commands to run containers inside.
+/// Use `smolvm machine start --name <name>` to start, then
+/// `smolvm machine exec --name <name> -- <command>` to run commands inside.
 ///
 /// Examples:
 ///   smolvm machine create myvm
