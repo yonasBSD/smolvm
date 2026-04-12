@@ -279,16 +279,18 @@ impl PackCreateCmd {
         // Export and collect layers
         println!("Exporting {} layers...", image_info.layer_count);
         for (i, layer_digest) in image_info.layers.iter().enumerate() {
-            println!(
-                "  Layer {}/{}: {}...",
+            let prefix = format!(
+                "  Layer {}/{}: {}",
                 i + 1,
                 image_info.layer_count,
                 &layer_digest[..19]
             );
+            print!("{}...", prefix);
+            let _ = std::io::Write::flush(&mut std::io::stdout());
 
             // Export layer via agent — streamed directly to staging disk (zero memory buffering)
             let layer_file = collector.layer_staging_path(layer_digest);
-            self.export_layer_to_file(&mut client, &image_info.digest, i, &layer_file)?;
+            self.export_layer_to_file(&mut client, &image_info.digest, i, &layer_file, &prefix)?;
 
             // Register the already-written file in the collector's inventory
             collector
@@ -746,6 +748,7 @@ impl PackCreateCmd {
         image_digest: &str,
         layer_index: usize,
         dest: &std::path::Path,
+        progress_prefix: &str,
     ) -> smolvm::Result<()> {
         use smolvm_protocol::AgentRequest;
         use std::io::Write;
@@ -770,6 +773,7 @@ impl PackCreateCmd {
 
         let start = Instant::now();
         let mut total_bytes = 0u64;
+        let mut last_progress = Instant::now();
         loop {
             if start.elapsed() > LAYER_EXPORT_TIMEOUT {
                 return Err(Error::agent(
@@ -790,11 +794,19 @@ impl PackCreateCmd {
                             Error::agent("export layer", format!("write failed: {}", e))
                         })?;
                         total_bytes += data.len() as u64;
+
+                        // Update progress every 500ms
+                        if last_progress.elapsed() >= Duration::from_millis(500) {
+                            print!("\r{}... {}", progress_prefix, fmt_bytes(total_bytes));
+                            let _ = std::io::stdout().flush();
+                            last_progress = Instant::now();
+                        }
                     }
                     if done {
                         file.flush().map_err(|e| {
                             Error::agent("export layer", format!("flush failed: {}", e))
                         })?;
+                        println!("\r{}... {} done", progress_prefix, fmt_bytes(total_bytes));
                         return Ok(());
                     }
                 }
@@ -1222,6 +1234,15 @@ fn build_registry_client(
     }
 
     Ok(client)
+}
+
+/// Format a byte count as a human-readable string (KB for < 1 MB, MB otherwise).
+fn fmt_bytes(bytes: u64) -> String {
+    if bytes < 1024 * 1024 {
+        format!("{} KB", bytes / 1024)
+    } else {
+        format!("{} MB", bytes / (1024 * 1024))
+    }
 }
 
 /// Calculate the total size of a directory (recursive).
