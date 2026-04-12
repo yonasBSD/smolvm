@@ -718,7 +718,7 @@ pub async fn resize_machine(
     if let Some(storage_gb) = req.storage_gb {
         if storage_gb > current_storage_gb {
             let storage_path = manager.storage_path();
-            crate::storage::expand_disk(storage_path, storage_gb, "storage")
+            crate::storage::expand_disk::<crate::storage::Storage>(storage_path, storage_gb)
                 .map_err(|e| ApiError::internal(format!("failed to expand storage: {}", e)))?;
         }
     }
@@ -726,7 +726,7 @@ pub async fn resize_machine(
     if let Some(overlay_gb) = req.overlay_gb {
         if overlay_gb > current_overlay_gb {
             let overlay_path = manager.overlay_path();
-            crate::storage::expand_disk(overlay_path, overlay_gb, "overlay")
+            crate::storage::expand_disk::<crate::storage::Overlay>(overlay_path, overlay_gb)
                 .map_err(|e| ApiError::internal(format!("failed to expand overlay: {}", e)))?;
         }
     }
