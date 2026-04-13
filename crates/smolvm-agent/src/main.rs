@@ -924,6 +924,7 @@ fn create_storage_dirs(mount_point: &str) {
         "configs",
         "manifests",
         "overlays",
+        "workspace",
         "containers/run",
         "containers/logs",
         "containers/exit",
@@ -1514,14 +1515,64 @@ fn apply_mode_best_effort(path: &std::path::Path, mode: u32) {
 #[cfg(not(unix))]
 fn apply_mode_best_effort(_path: &std::path::Path, _mode: u32) {}
 
-/// Atomically install `data` at `path` via a staging file + rename.
+/// Resolve a guest path through the active persistent container overlay.
 ///
+/// When an image-based VM has a mounted persistent overlay, file I/O
+/// paths (from `machine cp`) target the overlay's merged directory so
+/// files are visible inside the container. The host ensures the overlay
+/// is mounted before sending file I/O requests (via `PrepareOverlay`).
+///
+/// Returns the path unchanged for bare VMs (no overlay) or paths that
+/// target the VM's internal directories (`/storage/...`).
+fn resolve_container_path(path: &str) -> std::path::PathBuf {
+    // Don't redirect VM-internal paths.
+    if path.starts_with("/storage/") || path.starts_with("/proc/") || path.starts_with("/sys/") {
+        return std::path::PathBuf::from(path);
+    }
+
+    // /workspace is bind-mounted from /storage/workspace into the container.
+    // Rewrite so the agent writes to the bind-mount source.
+    if let Some(relative) =
+        path.strip_prefix("/workspace/").or_else(
+            || {
+                if path == "/workspace" {
+                    Some("")
+                } else {
+                    None
+                }
+            },
+        )
+    {
+        return std::path::PathBuf::from("/storage/workspace").join(relative);
+    }
+
+    let overlays_dir = std::path::Path::new("/storage/overlays");
+    if let Ok(entries) = std::fs::read_dir(overlays_dir) {
+        for entry in entries.flatten() {
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("persistent-")
+            {
+                continue;
+            }
+            let merged = entry.path().join("merged");
+            if merged.join("bin").exists() || merged.join("usr").exists() {
+                let relative = path.strip_prefix('/').unwrap_or(path);
+                return merged.join(relative);
+            }
+        }
+    }
+    std::path::PathBuf::from(path)
+}
+
 /// Shared between single-shot [`handle_file_write`] and the streaming
 /// finalize step. The atomic-rename pattern is the thing both paths
 /// need to guarantee: partial contents never appear at `path` under
 /// any error or kill scenario.
 fn install_file_atomic(path: &str, data: &[u8], mode: Option<u32>) -> AgentResponse {
-    let target = std::path::Path::new(path);
+    let resolved = resolve_container_path(path);
+    let target = resolved.as_path();
     if let Err(resp) = ensure_parent_dir(target) {
         return resp;
     }
@@ -1736,7 +1787,8 @@ fn handle_file_write_begin(
             ),
         );
     }
-    match WriteSession::open(path.into(), mode, total_size) {
+    let resolved = resolve_container_path(&path);
+    match WriteSession::open(resolved, mode, total_size) {
         Ok(session) => (Some(session), AgentResponse::Ok { data: None }),
         Err(e) => (
             None,
@@ -1854,7 +1906,8 @@ fn handle_streaming_file_read(
     stream: &mut impl ReadWrite,
     path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut file = match std::fs::File::open(path) {
+    let resolved = resolve_container_path(path);
+    let mut file = match std::fs::File::open(&resolved) {
         Ok(f) => f,
         Err(e) => {
             send_response(
@@ -2042,6 +2095,12 @@ fn spawn_interactive_command(
         );
     }
 
+    // Shared workspace: /storage/workspace → /workspace inside container
+    let workspace_src = std::path::Path::new("/storage/workspace");
+    if workspace_src.exists() {
+        spec.add_bind_mount(&workspace_src.to_string_lossy(), "/workspace", false);
+    }
+
     spec.write_to(&bundle_path)
         .map_err(|e| format!("failed to write OCI spec: {}", e))?;
 
@@ -2121,6 +2180,12 @@ fn spawn_interactive_command(
             container_path,
             *read_only,
         );
+    }
+
+    // Shared workspace: /storage/workspace → /workspace inside container
+    let workspace_src = std::path::Path::new("/storage/workspace");
+    if workspace_src.exists() {
+        spec.add_bind_mount(&workspace_src.to_string_lossy(), "/workspace", false);
     }
 
     spec.write_to(&bundle_path)

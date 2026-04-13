@@ -26,6 +26,7 @@ const LAYERS_DIR: &str = "layers";
 const CONFIGS_DIR: &str = "configs";
 const MANIFESTS_DIR: &str = "manifests";
 const OVERLAYS_DIR: &str = "overlays";
+const WORKSPACE_DIR: &str = "workspace";
 
 /// Global state for packed layers support.
 /// Set at startup if SMOLVM_PACKED_LAYERS env var is present.
@@ -595,6 +596,10 @@ pub fn init() -> Result<()> {
         (CONFIGS_DIR, "image configurations"),
         (MANIFESTS_DIR, "image manifests"),
         (OVERLAYS_DIR, "overlay filesystems"),
+        (
+            WORKSPACE_DIR,
+            "shared workspace (visible inside containers)",
+        ),
     ];
 
     for (dir, description) in &required_dirs {
@@ -1551,6 +1556,11 @@ impl OverlaySetup {
 }
 
 /// Prepare an overlay filesystem for a workload.
+///
+/// Reuses an existing overlay if already mounted, remounts if the upper
+/// directory exists (preserving state from previous sessions), or creates
+/// a fresh overlay. This idempotent behavior is critical for `machine cp`
+/// which may call this before or after `machine exec`.
 pub fn prepare_overlay(image: &str, workload_id: &str) -> Result<OverlayInfo> {
     // Check if we have packed layers available
     if let Some(packed_dir) = get_packed_layers_dir() {
@@ -1574,8 +1584,7 @@ pub fn prepare_overlay(image: &str, workload_id: &str) -> Result<OverlayInfo> {
         })
         .collect();
 
-    // Use shared overlay setup logic
-    OverlaySetup::new(workload_id).execute(lowerdirs)
+    OverlaySetup::new(workload_id).execute_or_remount(lowerdirs)
 }
 
 /// Prepare an overlay filesystem using pre-packed layers.
@@ -1835,6 +1844,12 @@ pub fn run_command(
                 container_path,
                 *read_only,
             );
+        }
+
+        // Shared workspace: /storage/workspace → /workspace inside container
+        let workspace_src = Path::new(STORAGE_ROOT).join(WORKSPACE_DIR);
+        if workspace_src.exists() {
+            spec.add_bind_mount(&workspace_src.to_string_lossy(), "/workspace", false);
         }
 
         // Write config.json to bundle

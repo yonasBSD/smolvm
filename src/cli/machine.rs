@@ -1376,9 +1376,23 @@ impl CpCmd {
                 ));
             };
 
-        let (manager, mut client) = vm_common::ensure_running_and_connect(&Some(machine_name))?;
+        let (manager, mut client) =
+            vm_common::ensure_running_and_connect(&Some(machine_name.clone()))?;
         // Detach so the VM keeps running after cp exits.
         manager.detach();
+
+        // For image-based VMs, ensure the persistent container overlay is
+        // mounted so cp targets the container filesystem (not the VM rootfs).
+        // prepare_overlay is idempotent: reuses if mounted, remounts if upper
+        // exists, creates fresh otherwise.
+        if let Some(image) = smolvm::db::SmolvmDb::open()
+            .ok()
+            .and_then(|db| db.get_vm(&machine_name).ok().flatten())
+            .and_then(|r| r.image.clone())
+        {
+            let overlay_id = format!("persistent-{}", machine_name);
+            let _ = client.prepare_overlay(&image, &overlay_id);
+        }
 
         if is_upload {
             // Stream from file — only one chunk (~1 MiB) in memory at a time.

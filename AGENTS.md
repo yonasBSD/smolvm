@@ -225,6 +225,29 @@ smolvm machine cp ./script.py myvm:/workspace/script.py
 smolvm machine cp myvm:/workspace/output.json ./output.json
 ```
 
+**Image-based VMs (--image):** Files copied with `cp` are visible to
+`exec` at the same path, and vice versa. This works for any path —
+`/tmp`, `/home`, `/workspace`, etc. Under the hood, `cp` routes
+through the container's overlay filesystem so both commands see the
+same files.
+
+**`/workspace` shared directory:** Every machine has a `/workspace`
+directory that is shared between the VM and the container. It persists
+across `exec` sessions and is a good default location for scripts,
+data, and results:
+
+```bash
+# Typical agent workflow: copy code in, execute, extract results
+smolvm machine create r-sandbox --image r-base:latest --net
+smolvm machine start --name r-sandbox
+
+smolvm machine cp analysis.R r-sandbox:/workspace/analysis.R
+smolvm machine exec --name r-sandbox -- Rscript /workspace/analysis.R
+smolvm machine cp r-sandbox:/workspace/results.csv ./results.csv
+
+smolvm machine stop --name r-sandbox
+```
+
 **Behavior and limits:**
 
 - Files up to 1 MiB transfer as a single message — no perceptible
@@ -245,7 +268,7 @@ smolvm machine cp myvm:/workspace/output.json ./output.json
   mid-stream, the staging file is cleaned up and the original
   destination (if any) is unaffected.
 
-Typical throughput on local KVM, Linux host: ~11 MB/s upload,
+Typical throughput on macOS (Apple Silicon): ~35-42 MB/s upload,
 ~170 MB/s download.
 
 ## Streaming Exec
