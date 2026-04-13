@@ -146,6 +146,27 @@ install_packages_apk_static() {
     echo "Packages installed successfully"
 }
 
+repair_required_tool_modes() {
+    local rootfs_dir="$1"
+    local tools=(
+        "$rootfs_dir/usr/bin/crun"
+        "$rootfs_dir/usr/sbin/resize2fs"
+    )
+
+    echo "Repairing required tool permissions..."
+    for tool in "${tools[@]}"; do
+        if [[ ! -f "$tool" ]]; then
+            continue
+        fi
+
+        # On the macOS build path, apk install into the host-mounted rootfs can
+        # leave these guest tools without execute bits (observed as mode 0600).
+        # They are required for packed/container execution, so restore the
+        # standard executable mode before install or packing preserves the bug.
+        chmod 755 "$tool"
+    done
+}
+
 if [[ "$(uname -s)" == "Linux" ]]; then
     # On Linux, apk.static is preferred — it handles cross-arch correctly
     install_packages_apk_static
@@ -164,6 +185,8 @@ else
     echo "Install smolvm first: https://github.com/smolvm/smolvm"
     exit 1
 fi
+
+repair_required_tool_modes "$OUTPUT_DIR"
 
 # Create necessary directories
 mkdir -p "$OUTPUT_DIR/storage"
