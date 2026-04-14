@@ -6,6 +6,7 @@
 #   ./tests/run_all.sh              # Run all tests
 #   ./tests/run_all.sh cli          # Run only CLI tests
 #   ./tests/run_all.sh machine      # Run only machine tests
+#   ./tests/run_all.sh virtio-net   # Run only virtio-net tests
 #   ./tests/run_all.sh container    # Run only container tests
 #   ./tests/run_all.sh api          # Run only HTTP API tests
 #   ./tests/run_all.sh pack         # Run only pack tests
@@ -95,6 +96,9 @@ case "$TESTS_TO_RUN" in
     machine)
         run_suite "Machine Tests" "$SCRIPT_DIR/test_machine.sh"
         ;;
+    virtio-net)
+        run_suite "Virtio-Net Tests" "$SCRIPT_DIR/test_virtio_net.sh"
+        ;;
     api)
         run_suite "HTTP API Tests" "$SCRIPT_DIR/test_api.sh"
         ;;
@@ -121,13 +125,14 @@ case "$TESTS_TO_RUN" in
     all)
         run_suite "CLI Tests" "$SCRIPT_DIR/test_cli.sh"
         run_suite "Machine Tests" "$SCRIPT_DIR/test_machine.sh"
+        run_suite "Virtio-Net Tests" "$SCRIPT_DIR/test_virtio_net.sh"
         run_suite "HTTP API Tests" "$SCRIPT_DIR/test_api.sh"
         run_suite "Pack Tests" "$SCRIPT_DIR/test_pack.sh"
         run_suite "Smolfile & SSH Agent Tests" "$SCRIPT_DIR/test_smolfile.sh"
         ;;
     *)
         echo "Unknown test suite: $TESTS_TO_RUN"
-        echo "Available: cli, machine, smolfile, api, pack, pack-quick, bench, bench-vm, all"
+        echo "Available: cli, machine, virtio-net, smolfile, api, pack, pack-quick, bench, bench-vm, all"
         exit 1
         ;;
 esac
