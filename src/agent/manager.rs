@@ -1046,6 +1046,7 @@ impl AgentManager {
                 resources: resources_for_fork,
                 ssh_agent_socket: features.ssh_agent_socket.as_deref(),
                 dns_filter_socket: dns_filter_socket_path.as_deref(),
+                packed_layers_dir: features.packed_layers_dir.as_deref(),
             });
 
             // If we get here, something went wrong (stderr is /dev/null,
@@ -1117,6 +1118,7 @@ impl AgentManager {
             resources: resources_for_config.clone(),
             ssh_agent_socket: features.ssh_agent_socket,
             dns_filter_hosts: features.dns_filter_hosts,
+            packed_layers_dir: features.packed_layers_dir,
         };
         let config_path = self
             .storage_disk

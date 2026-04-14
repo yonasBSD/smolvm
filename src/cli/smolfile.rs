@@ -80,6 +80,7 @@ pub fn build_create_params(
                 health_startup_grace_secs: None,
                 ssh_agent: false,
                 dns_filter_hosts: None,
+                source_smolmachine: None,
             });
         }
     };
@@ -271,6 +272,7 @@ pub fn build_create_params(
         } else {
             Some(sf_allow_hosts)
         },
+        source_smolmachine: None,
     })
 }
 

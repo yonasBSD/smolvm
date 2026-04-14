@@ -439,6 +439,12 @@ pub struct VmRecord {
     /// True for `machine run` VMs. Auto-deleted on exit or cleanup sweep.
     #[serde(default)]
     pub ephemeral: bool,
+
+    /// Absolute path to the .smolmachine sidecar this machine was created from.
+    /// When set, `machine start` extracts layers from the sidecar and mounts
+    /// them via virtiofs instead of pulling the image from a registry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_smolmachine: Option<String>,
 }
 
 fn default_cpus() -> u8 {
@@ -489,6 +495,7 @@ impl VmRecord {
             ssh_agent: false,
             dns_filter_hosts: None,
             ephemeral: false,
+            source_smolmachine: None,
         }
     }
 
@@ -532,6 +539,7 @@ impl VmRecord {
             ssh_agent: false,
             dns_filter_hosts: None,
             ephemeral: false,
+            source_smolmachine: None,
         }
     }
 

@@ -317,6 +317,8 @@ pub struct CreateVmParams {
     pub ssh_agent: bool,
     /// Hostnames for DNS filtering (from --allow-host / [network].allow_hosts).
     pub dns_filter_hosts: Option<Vec<String>>,
+    /// Absolute path to .smolmachine sidecar (for machines created with --from).
+    pub source_smolmachine: Option<String>,
 }
 
 /// Create a named machine configuration (does not start it).
@@ -381,6 +383,7 @@ pub fn create_vm(params: CreateVmParams) -> smolvm::Result<()> {
     record.health_startup_grace_secs = params.health_startup_grace_secs;
     record.ssh_agent = params.ssh_agent;
     record.dns_filter_hosts = params.dns_filter_hosts.clone();
+    record.source_smolmachine = params.source_smolmachine.clone();
 
     // Store in config (persisted immediately to database)
     config.insert_vm(params.name.clone(), record)?;
@@ -480,10 +483,39 @@ pub fn start_vm_named(name: &str) -> smolvm::Result<()> {
         None
     };
 
-    let features = smolvm::agent::LaunchFeatures {
+    let mut features = smolvm::agent::LaunchFeatures {
         ssh_agent_socket,
         dns_filter_hosts: record.dns_filter_hosts.clone(),
+        packed_layers_dir: None,
     };
+
+    // If machine was created from .smolmachine, extract layers to cache and
+    // mount via virtiofs so the agent uses pre-extracted layers instead of
+    // pulling from a registry.
+    if let Some(ref sidecar_path) = record.source_smolmachine {
+        let sidecar = std::path::Path::new(sidecar_path);
+        if !sidecar.exists() {
+            return Err(Error::agent(
+                "start machine",
+                format!(
+                    "source .smolmachine not found: {}\nThe file may have been moved or deleted.",
+                    sidecar_path
+                ),
+            ));
+        }
+        let footer = smolvm_pack::packer::read_footer_from_sidecar(sidecar)
+            .map_err(|e| Error::agent("read sidecar footer", e.to_string()))?;
+        let cache_dir = smolvm_pack::extract::get_cache_dir(footer.checksum)
+            .map_err(|e| Error::agent("get cache dir", e.to_string()))?;
+        smolvm_pack::extract::extract_sidecar(sidecar, &cache_dir, &footer, false, false)
+            .map_err(|e| Error::agent("extract sidecar", e.to_string()))?;
+        let layers_lease = smolvm_pack::extract::acquire_layers_lease(&cache_dir, false)
+            .map_err(|e| Error::agent("acquire layers lease", e.to_string()))?;
+        features.packed_layers_dir = Some(layers_lease.path.clone());
+        // Leak the lease — the volume must stay mounted while the VM runs.
+        // Cleanup happens via `pack prune` or on next `machine start`.
+        std::mem::forget(layers_lease);
+    }
 
     let _ = manager
         .ensure_running_with_full_config(mounts, ports, resources, features)
@@ -504,7 +536,9 @@ pub fn start_vm_named(name: &str) -> smolvm::Result<()> {
     // would hit the bare Alpine agent and fail with "not found".
     let mut client = smolvm::agent::AgentClient::connect_with_retry(manager.vsock_socket())?;
 
-    if let Some(ref image) = record.image {
+    if record.source_smolmachine.is_some() {
+        // Layers already mounted via virtiofs — no pull needed.
+    } else if let Some(ref image) = record.image {
         println!("Pulling {}...", image);
         let _image_info = crate::cli::pull_with_progress(&mut client, image, None)?;
     }

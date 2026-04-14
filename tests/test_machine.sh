@@ -1149,6 +1149,79 @@ echo ""
 run_test "Auto-generated names" test_auto_generated_names || true
 
 # =============================================================================
+# Create from .smolmachine
+# =============================================================================
+
+test_create_from_smolmachine() {
+    local vm_name="from-smolmachine-$$"
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    local pack_output="$tmpdir/from-sm-pack"
+
+    # 1. Pack alpine into a .smolmachine
+    $SMOLVM pack create --image alpine:latest -o "$pack_output" --cpus 1 --mem 512 2>&1 || {
+        echo "SKIP: pack create failed"
+        return 0
+    }
+    [[ -f "$pack_output.smolmachine" ]] || { echo "FAIL: no sidecar"; return 1; }
+
+    # 2. Create a named machine from it
+    $SMOLVM machine create "$vm_name" --from "$pack_output.smolmachine" 2>&1 || return 1
+
+    # 3. Start the machine (should NOT pull — uses extracted layers)
+    $SMOLVM machine start --name "$vm_name" 2>&1 || {
+        echo "FAIL: start failed"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$tmpdir"; return 1
+    }
+
+    # 4. Exec works
+    local exec_result
+    exec_result=$($SMOLVM machine exec --name "$vm_name" -- echo "from-sm-ok" 2>&1)
+    [[ "$exec_result" == *"from-sm-ok"* ]] || {
+        echo "FAIL: exec failed: $exec_result"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$tmpdir"; return 1
+    }
+
+    # 5. Persistence: write then read
+    $SMOLVM machine exec --name "$vm_name" -- sh -c 'echo persist > /tmp/sm.txt' 2>&1 || true
+    local read_result
+    read_result=$($SMOLVM machine exec --name "$vm_name" -- cat /tmp/sm.txt 2>&1)
+    [[ "$read_result" == *"persist"* ]] || {
+        echo "FAIL: persistence failed"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$tmpdir"; return 1
+    }
+
+    # 6. Stop and restart — persistence survives
+    $SMOLVM machine stop --name "$vm_name" 2>&1 || true
+    $SMOLVM machine start --name "$vm_name" 2>&1 || {
+        echo "FAIL: restart failed"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$tmpdir"; return 1
+    }
+    read_result=$($SMOLVM machine exec --name "$vm_name" -- cat /tmp/sm.txt 2>&1)
+    [[ "$read_result" == *"persist"* ]] || {
+        echo "FAIL: persistence across restart failed"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$tmpdir"; return 1
+    }
+
+    # 7. Shows in ls
+    $SMOLVM machine ls --json 2>&1 | grep -q "$vm_name" || {
+        echo "FAIL: not in ls"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$tmpdir"; return 1
+    }
+
+    # 8. Cleanup
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+    rm -rf "$tmpdir"
+}
+
+run_test "Create from .smolmachine" test_create_from_smolmachine || true
+
+# =============================================================================
 # Ephemeral VM Tracking
 # =============================================================================
 

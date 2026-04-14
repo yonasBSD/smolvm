@@ -363,6 +363,7 @@ impl RunCmd {
         let features = smolvm::agent::LaunchFeatures {
             ssh_agent_socket,
             dns_filter_hosts,
+            packed_layers_dir: None,
         };
 
         let freshly_started = manager
@@ -922,10 +923,20 @@ pub struct CreateCmd {
     /// Load configuration from a Smolfile (TOML)
     #[arg(long = "smolfile", visible_short_alias = 's', value_name = "PATH")]
     pub smolfile: Option<PathBuf>,
+
+    /// Create machine from a packed .smolmachine artifact.
+    /// Uses pre-extracted layers instead of pulling from a registry.
+    #[arg(long, value_name = "PATH", conflicts_with_all = ["image", "smolfile"])]
+    pub from: Option<PathBuf>,
 }
 
 impl CreateCmd {
     pub fn run(self) -> smolvm::Result<()> {
+        // Branch for --from: create machine from .smolmachine artifact.
+        if let Some(ref sidecar_path) = self.from {
+            return self.run_from_smolmachine(sidecar_path);
+        }
+
         let (cli_allow_cidrs, net, _dns_filter_hosts) = resolve_egress_flags(
             self.allow_cidr,
             self.allow_host,
@@ -961,6 +972,90 @@ impl CreateCmd {
         }
         PortMapping::check_duplicates(&params.port)
             .map_err(|e| smolvm::Error::config("validate ports", e))?;
+        vm_common::create_vm(params)
+    }
+
+    /// Create a machine from a .smolmachine artifact.
+    fn run_from_smolmachine(&self, sidecar_path: &std::path::Path) -> smolvm::Result<()> {
+        use smolvm::data::resources::{DEFAULT_MICROVM_CPU_COUNT, DEFAULT_MICROVM_MEMORY_MIB};
+
+        if !sidecar_path.exists() {
+            return Err(smolvm::Error::config(
+                "create from .smolmachine",
+                format!("file not found: {}", sidecar_path.display()),
+            ));
+        }
+
+        // Read manifest from the sidecar to get image metadata.
+        let manifest = smolvm_pack::packer::read_manifest_from_sidecar(sidecar_path)
+            .map_err(|e| smolvm::Error::agent("read .smolmachine", e.to_string()))?;
+
+        // Pre-extract the sidecar so first `machine start` is fast.
+        let footer = smolvm_pack::packer::read_footer_from_sidecar(sidecar_path)
+            .map_err(|e| smolvm::Error::agent("read sidecar footer", e.to_string()))?;
+        let cache_dir = smolvm_pack::extract::get_cache_dir(footer.checksum)
+            .map_err(|e| smolvm::Error::agent("get cache dir", e.to_string()))?;
+        println!("Extracting .smolmachine assets...");
+        smolvm_pack::extract::extract_sidecar(sidecar_path, &cache_dir, &footer, false, false)
+            .map_err(|e| smolvm::Error::agent("extract sidecar", e.to_string()))?;
+
+        // Resolve the canonical path for storage in VmRecord.
+        let canonical_path = sidecar_path
+            .canonicalize()
+            .unwrap_or_else(|_| sidecar_path.to_path_buf())
+            .to_string_lossy()
+            .into_owned();
+
+        let name = self
+            .name
+            .clone()
+            .unwrap_or_else(smolvm::util::generate_machine_name);
+
+        // CLI flags override manifest defaults.
+        let cpus = if self.cpus != DEFAULT_MICROVM_CPU_COUNT {
+            self.cpus
+        } else {
+            manifest.cpus
+        };
+        let mem = if self.mem != DEFAULT_MICROVM_MEMORY_MIB {
+            self.mem
+        } else {
+            manifest.mem
+        };
+
+        let params = vm_common::CreateVmParams {
+            name,
+            image: Some(manifest.image),
+            entrypoint: manifest.entrypoint,
+            cmd: manifest.cmd,
+            cpus,
+            mem,
+            volume: self.volume.clone(),
+            port: self.port.clone(),
+            net: self.net || manifest.network,
+            init: self.init.clone(),
+            env: {
+                let mut env = manifest.env;
+                env.extend(self.env.iter().cloned());
+                env
+            },
+            workdir: manifest.workdir,
+            storage_gb: self.storage,
+            overlay_gb: self.overlay,
+            allowed_cidrs: None,
+            restart_policy: None,
+            restart_max_retries: None,
+            restart_max_backoff_secs: None,
+            health_cmd: None,
+            health_interval_secs: None,
+            health_timeout_secs: None,
+            health_retries: None,
+            health_startup_grace_secs: None,
+            ssh_agent: self.ssh_agent,
+            dns_filter_hosts: None,
+            source_smolmachine: Some(canonical_path),
+        };
+
         vm_common::create_vm(params)
     }
 }
