@@ -452,6 +452,11 @@ pub fn start_vm_named(name: &str) -> smolvm::Result<()> {
     let ports = record.port_mappings();
     let resources = record.vm_resources();
 
+    // Check for host port conflicts with other running VMs.
+    if !ports.is_empty() {
+        check_port_conflicts(name, &ports, &db)?;
+    }
+
     // Start agent VM
     let manager = AgentManager::for_vm_with_sizes(name, record.storage_gb, record.overlay_gb)
         .map_err(|e| Error::agent("create agent manager", e.to_string()))?;
@@ -669,6 +674,45 @@ pub struct DefaultVmOverrides {
     pub entrypoint: Vec<String>,
     pub cmd: Vec<String>,
     pub ssh_agent: bool,
+}
+
+/// Check if any running VM already binds to the same host ports.
+///
+/// Iterates all VM records, skipping the current VM (`self_name`), and checks
+/// for host port overlaps with running VMs. This prevents silent port binding
+/// failures where two VMs claim the same host port but only one succeeds.
+fn check_port_conflicts(
+    self_name: &str,
+    ports: &[PortMapping],
+    db: &SmolvmDb,
+) -> smolvm::Result<()> {
+    let host_ports: std::collections::HashSet<u16> = ports.iter().map(|p| p.host).collect();
+    if host_ports.is_empty() {
+        return Ok(());
+    }
+
+    let all_vms = db.list_vms()?;
+    for (name, record) in &all_vms {
+        if name == self_name {
+            continue;
+        }
+        // Only check running VMs (PID-based quick check).
+        if record.actual_state() != smolvm::config::RecordState::Running {
+            continue;
+        }
+        for (host, _guest) in &record.ports {
+            if host_ports.contains(host) {
+                return Err(smolvm::Error::config(
+                    "start machine",
+                    format!(
+                        "host port {} is already in use by running machine '{}'",
+                        host, name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Start the default machine.

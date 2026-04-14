@@ -1043,6 +1043,36 @@ run_test "Volume: mount visible to exec" test_machine_volume_mount_visible_to_ex
 run_test "Port: mapping host to guest HTTP" test_machine_port_mapping_http || true
 run_test "Overlay: custom size via --overlay" test_machine_overlay_size || true
 
+# Regression: two VMs with the same host port should conflict on start.
+test_port_conflict_across_vms() {
+    local vm_a="port-conflict-a-$$"
+    local vm_b="port-conflict-b-$$"
+
+    $SMOLVM machine create "$vm_a" -p 19876:80 --net 2>&1 >/dev/null || return 1
+    $SMOLVM machine create "$vm_b" -p 19876:80 --net 2>&1 >/dev/null || return 1
+
+    $SMOLVM machine start --name "$vm_a" 2>&1 >/dev/null || {
+        $SMOLVM machine delete "$vm_a" -f 2>/dev/null
+        $SMOLVM machine delete "$vm_b" -f 2>/dev/null
+        return 1
+    }
+
+    # Second start should fail with port conflict
+    local exit_code=0
+    local output
+    output=$($SMOLVM machine start --name "$vm_b" 2>&1) || exit_code=$?
+    [[ $exit_code -ne 0 ]] || { echo "expected port conflict error"; }
+    [[ "$output" == *"already in use"* ]] || { echo "expected 'already in use' message"; }
+
+    $SMOLVM machine stop --name "$vm_a" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_a" -f 2>/dev/null || true
+    $SMOLVM machine delete "$vm_b" -f 2>/dev/null || true
+
+    [[ $exit_code -ne 0 ]]
+}
+
+run_test "Port: cross-VM conflict detected" test_port_conflict_across_vms || true
+
 echo ""
 echo "--- Machine Run (Ephemeral) Tests ---"
 echo ""
