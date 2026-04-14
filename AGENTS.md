@@ -328,7 +328,7 @@ The `.smolmachine` manifest includes registry-oriented metadata:
 
 ## HTTP API
 
-Start with `smolvm serve start --listen 127.0.0.1:8080` or `smolvm serve start --listen /tmp/smol.sock`. Key endpoints:
+Start with `smolvm serve start --listen 127.0.0.1:8080` or `smolvm serve start --listen $XDG_RUNTIME_DIR/smolvm.sock`. Key endpoints:
 
 ```
 POST   /api/v1/machines                    Create machine

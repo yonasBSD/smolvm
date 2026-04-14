@@ -228,7 +228,11 @@ impl ListenTarget {
 fn default_listen_value() -> String {
     #[cfg(unix)]
     {
-        String::from("/var/run/smolvm.sock")
+        dirs::runtime_dir()
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+            .join("smolvm.sock")
+            .display()
+            .to_string()
     }
 
     #[cfg(not(unix))]
@@ -311,7 +315,7 @@ async fn shutdown_signal() {
 
 #[cfg(test)]
 mod tests {
-    use super::ListenTarget;
+    use super::{default_listen_value, ListenTarget};
 
     #[test]
     fn parse_tcp_listen_target() {
