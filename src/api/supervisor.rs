@@ -192,6 +192,11 @@ impl Supervisor {
 
     /// Get the console log path for a machine.
     fn get_machine_log_path(&self, name: &str) -> Option<std::path::PathBuf> {
+        if crate::data::validate_vm_name(name, "machine name").is_err() {
+            tracing::warn!(machine = %name, "skipping invalid machine name when resolving log path");
+            return None;
+        }
+
         let runtime_dir = dirs::runtime_dir()
             .or_else(dirs::cache_dir)
             .unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
