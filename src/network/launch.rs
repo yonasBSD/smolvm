@@ -234,10 +234,9 @@ mod tests {
         resources.network = true;
         resources.network_backend = Some(NetworkBackend::VirtioNet);
         let err = validate_requested_network_backend(&resources, None, 0).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("current virtio-net implementation is not ready yet")
-        );
+        assert!(err
+            .to_string()
+            .contains("current virtio-net implementation is not ready yet"));
     }
 
     #[test]
@@ -246,10 +245,9 @@ mod tests {
         resources.network = true;
         resources.network_backend = Some(NetworkBackend::VirtioNet);
         let err = validate_requested_network_backend(&resources, None, 1).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("published ports are not supported")
-        );
+        assert!(err
+            .to_string()
+            .contains("published ports are not supported"));
     }
 
     #[test]
@@ -259,9 +257,8 @@ mod tests {
         resources.network_backend = Some(NetworkBackend::VirtioNet);
         resources.allowed_cidrs = Some(vec!["1.1.1.1/32".into()]);
         let err = validate_requested_network_backend(&resources, None, 0).unwrap_err();
-        assert!(
-            err.to_string()
-                .contains("allow-cidr/allow-host policies are not supported")
-        );
+        assert!(err
+            .to_string()
+            .contains("allow-cidr/allow-host policies are not supported"));
     }
 }
