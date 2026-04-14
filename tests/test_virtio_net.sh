@@ -19,30 +19,27 @@ echo "  smolvm Virtio-Net Tests"
 echo "=========================================="
 echo ""
 
-test_machine_create_virtio_rejected_until_implemented() {
+test_machine_create_virtio_works() {
     cleanup_machine
     local vm_name="virtio-create-test-$$"
-    local exit_code=0
     local output
 
-    output=$($SMOLVM machine create "$vm_name" --net --net-backend virtio 2>&1) || exit_code=$?
-    [[ $exit_code -ne 0 ]] || {
-        echo "expected create failure for unsupported virtio backend"
+    output=$($SMOLVM machine create "$vm_name" --net --net-backend virtio 2>&1) || {
+        echo "expected virtio machine create to succeed"
+        echo "$output"
         $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
-        return 1
-    }
-    [[ "$output" == *"not ready yet on this branch"* ]] || {
-        echo "unexpected output: $output"
         return 1
     }
 
     local list_output
     list_output=$($SMOLVM machine ls --json 2>&1)
-    [[ "$list_output" != *"$vm_name"* ]] || {
-        echo "create failure should not persist machine state"
+    [[ "$list_output" == *"$vm_name"* ]] || {
+        echo "virtio create should persist machine state"
         $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
         return 1
     }
+
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
 }
 
 test_machine_run_virtio_rejected_until_implemented() {
@@ -117,7 +114,7 @@ test_pack_run_virtio_rejected_until_implemented() {
     }
 }
 
-run_test "Machine create: virtio rejected until implemented" test_machine_create_virtio_rejected_until_implemented || true
+run_test "Machine create: virtio works" test_machine_create_virtio_works || true
 run_test "Machine run: virtio rejected until implemented" test_machine_run_virtio_rejected_until_implemented || true
 run_test "Machine create: virtio + published ports rejected" test_machine_create_virtio_ports_rejected || true
 run_test "Machine create: virtio + policy rejected" test_machine_create_virtio_policy_rejected || true
