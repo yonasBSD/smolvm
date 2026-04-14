@@ -235,32 +235,7 @@ impl PackRunCmd {
 
         // 4. Handle --info: show manifest and exit
         if self.info {
-            let mode_str = match manifest.mode {
-                PackMode::Container => "container",
-                PackMode::Vm => "vm",
-            };
-            println!("Mode:       {}", mode_str);
-            println!("Image:      {}", manifest.image);
-            println!("Digest:     {}", manifest.digest);
-            println!("Platform:   {}", manifest.platform);
-            println!("CPUs:       {}", manifest.cpus);
-            println!("Memory:     {} MiB", manifest.mem);
-            if !manifest.entrypoint.is_empty() {
-                println!("Entrypoint: {}", manifest.entrypoint.join(" "));
-            }
-            if !manifest.cmd.is_empty() {
-                println!("Cmd:        {}", manifest.cmd.join(" "));
-            }
-            if let Some(ref wd) = manifest.workdir {
-                println!("Workdir:    {}", wd);
-            }
-            if !manifest.env.is_empty() {
-                println!("Env:");
-                for e in &manifest.env {
-                    println!("  {}", e);
-                }
-            }
-            println!("Checksum:   {:08x}", footer.checksum);
+            print_manifest_info(&manifest, footer.checksum);
             return Ok(());
         }
 
@@ -701,7 +676,7 @@ fn execute_command(
         tty: args.tty,
         timeout: args.timeout,
     };
-    execute_packed_command(client, manifest, params, mounts)
+    execute_packed_command(client, manifest, params, mounts, None)
 }
 
 /// Resolved execution parameters for a packed command.
@@ -721,6 +696,7 @@ fn execute_packed_command(
     manifest: &smolvm_pack::PackManifest,
     params: ExecParams,
     mounts: &[smolvm::data::storage::HostMount],
+    persistent_overlay_id: Option<String>,
 ) -> smolvm::Result<i32> {
     let ExecParams {
         command,
@@ -758,14 +734,16 @@ fn execute_packed_command(
                     .with_workdir(workdir)
                     .with_mounts(mount_bindings)
                     .with_timeout(timeout)
-                    .with_tty(tty);
+                    .with_tty(tty)
+                    .with_persistent_overlay(persistent_overlay_id.clone());
                 client.run_interactive(config)
             } else {
                 let config = RunConfig::new(&manifest.image, command)
                     .with_env(env)
                     .with_workdir(workdir)
                     .with_mounts(mount_bindings)
-                    .with_timeout(timeout);
+                    .with_timeout(timeout)
+                    .with_persistent_overlay(persistent_overlay_id);
                 let (exit_code, stdout, stderr) = client.run_non_interactive(config)?;
 
                 if !stdout.is_empty() {
@@ -1249,7 +1227,7 @@ fn run_from_cache(
         tty: args.tty,
         timeout: args.timeout,
     };
-    let exit_code = execute_packed_command(&mut client, manifest, params, &mounts)?;
+    let exit_code = execute_packed_command(&mut client, manifest, params, &mounts, None)?;
 
     drop(child_guard);
     drop(layers_lease);
@@ -1267,6 +1245,9 @@ fn print_manifest_info(manifest: &smolvm_pack::PackManifest, checksum: u32) {
     println!("Platform:   {}", manifest.platform);
     println!("CPUs:       {}", manifest.cpus);
     println!("Memory:     {} MiB", manifest.mem);
+    if manifest.network {
+        println!("Network:    enabled");
+    }
     if !manifest.entrypoint.is_empty() {
         println!("Entrypoint: {}", manifest.entrypoint.join(" "));
     }
@@ -1636,7 +1617,11 @@ fn daemon_exec(
         timeout: args.timeout,
     };
 
-    let exit_code = execute_packed_command(&mut client, manifest, params, &mounts)?;
+    // Daemon exec uses a persistent overlay so filesystem changes (package
+    // installs, config writes) survive across exec calls, matching the
+    // behavior of `machine exec` on persistent machines.
+    let overlay_id = Some("daemon".to_string());
+    let exit_code = execute_packed_command(&mut client, manifest, params, &mounts, overlay_id)?;
 
     std::process::exit(exit_code);
 }

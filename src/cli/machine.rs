@@ -386,11 +386,21 @@ impl RunCmd {
 
         // Pull image if one is specified
         let image_info = if let Some(ref img) = image {
-            Some(crate::cli::pull_with_progress(
-                &mut client,
-                img,
-                self.oci_platform.as_deref(),
-            )?)
+            match crate::cli::pull_with_progress(&mut client, img, self.oci_platform.as_deref()) {
+                Ok(info) => Some(info),
+                Err(e) if !params.net => {
+                    // Add a hint when pull fails and networking is disabled —
+                    // this is the most common user error.
+                    return Err(smolvm::Error::agent(
+                        "pull image",
+                        format!(
+                            "{}\n\nHint: networking is disabled. Add --net to enable image pulls:\n  smolvm machine run --net --image {} ...",
+                            e, img
+                        ),
+                    ));
+                }
+                Err(e) => return Err(e),
+            }
         } else {
             None
         };
