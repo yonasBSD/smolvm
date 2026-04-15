@@ -145,6 +145,9 @@ fn probe_agent(name: &str) -> bool {
     let Ok(manager) = AgentManager::for_vm(name) else {
         return false;
     };
+    // Detach immediately — this manager is only used to locate the vsock
+    // socket. Without detach, Drop sends Shutdown and kills the VM.
+    manager.detach();
     let Ok(mut client) = AgentClient::connect_with_short_timeout(manager.vsock_socket()) else {
         return false;
     };

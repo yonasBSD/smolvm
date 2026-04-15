@@ -1779,6 +1779,61 @@ test_prune_dry_run_refuses_on_running_vm() {
     [[ "$output" == *"cannot prune while the machine is running"* ]]
 }
 
+test_machine_ls_does_not_kill_vm() {
+    # Regression test: state_probe's probe_agent() used to create a temporary
+    # AgentManager without detaching it. When that manager was dropped, its
+    # Drop impl sent a Shutdown command to the agent, killing the VM.
+    # Every `machine ls` (and any state-checking command) triggered this.
+    # The old bug killed VMs within 10-20 seconds; we verify survival for 60s.
+    ensure_machine_running
+
+    # Repeatedly call `machine ls` — each call probes the agent via
+    # resolve_state → probe_agent. Before the fix, the first call
+    # would kill the VM.
+    for i in 1 2 3 4 5 6; do
+        local output
+        output=$($SMOLVM machine ls 2>&1)
+        [[ "$output" == *"running"* ]] || { echo "VM died after ls call #$i: $output"; return 1; }
+        sleep 10
+    done
+
+    # Exec must still work after 6 ls calls over 60 seconds
+    local result
+    result=$($SMOLVM machine exec -- echo "survived-ls-probe" 2>&1)
+    [[ "$result" == *"survived-ls-probe"* ]] || { echo "exec failed after ls probes: $result"; return 1; }
+}
+
+test_named_vm_survives_ls() {
+    # Same regression test but with a named VM — the customer's exact scenario:
+    # machine create X --from .smolmachine → machine start → machine ls shows stopped.
+    # Verify over 60 seconds with interleaved ls + exec.
+    local name="ls-probe-test"
+    $SMOLVM machine stop --name "$name" 2>/dev/null || true
+    $SMOLVM machine delete "$name" -f 2>/dev/null || true
+    $SMOLVM machine create "$name" 2>&1 || return 1
+    $SMOLVM machine start --name "$name" 2>&1 || return 1
+
+    # Wait for agent to be fully ready
+    sleep 2
+
+    for i in 1 2 3 4 5 6; do
+        local state
+        state=$($SMOLVM machine ls 2>&1 | grep "$name" | awk '{print $2}')
+        [[ "$state" == "running" ]] || { echo "VM '$name' died after ls #$i (state: $state)"; $SMOLVM machine delete "$name" -f 2>/dev/null; return 1; }
+        sleep 10
+    done
+
+    # Exec must work after 60 seconds of ls probing
+    local result
+    result=$($SMOLVM machine exec --name "$name" -- echo "alive" 2>&1)
+    [[ "$result" == *"alive"* ]] || { echo "exec failed: $result"; $SMOLVM machine delete "$name" -f 2>/dev/null; return 1; }
+
+    $SMOLVM machine stop --name "$name" 2>&1 || true
+    $SMOLVM machine delete "$name" -f 2>&1 || true
+}
+
+run_test "Listing: machine ls does not kill VM" test_machine_ls_does_not_kill_vm || true
+run_test "Listing: named VM survives repeated ls" test_named_vm_survives_ls || true
 run_test "Images: does not stop running VM" test_images_does_not_stop_running_vm || true
 run_test "Prune: refuses on running VM" test_prune_refuses_on_running_vm || true
 run_test "Prune --dry-run: refuses on running VM" test_prune_dry_run_refuses_on_running_vm || true
