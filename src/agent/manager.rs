@@ -1047,6 +1047,7 @@ impl AgentManager {
                 ssh_agent_socket: features.ssh_agent_socket.as_deref(),
                 dns_filter_socket: dns_filter_socket_path.as_deref(),
                 packed_layers_dir: features.packed_layers_dir.as_deref(),
+                extra_disks: &features.extra_disks,
             });
 
             // If we get here, something went wrong (stderr is /dev/null,
@@ -1119,6 +1120,7 @@ impl AgentManager {
             ssh_agent_socket: features.ssh_agent_socket,
             dns_filter_hosts: features.dns_filter_hosts,
             packed_layers_dir: features.packed_layers_dir,
+            extra_disks: features.extra_disks,
         };
         let config_path = self
             .storage_disk

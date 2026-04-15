@@ -387,12 +387,164 @@ impl PackCreateCmd {
             .map_err(|e| Error::agent("create temp directory", e.to_string()))?;
         let staging_dir = temp_dir.path().join("staging");
 
-        // 4. Collect base assets + overlay template
         let mut collector = AssetCollector::new(staging_dir.clone())
             .map_err(|e| Error::agent("collect assets", e.to_string()))?;
-        self.collect_base_assets(&mut collector)?;
 
-        // Add overlay template from VM
+        let is_image_based = vm.image.is_some();
+
+        // 4. For image-based VMs, export OCI layers + container overlay via temp VM.
+        // The container overlay (installed packages) lives inside the VM's ext4
+        // storage disk which can't be read on macOS — a temp VM mounts it for us.
+        if is_image_based {
+            let image = vm.image.clone().unwrap();
+            let storage_path = smolvm::agent::vm_data_dir(&vm_name).join("storage.raw");
+
+            self.collect_base_assets(&mut collector)?;
+
+            // Start temp VM with source VM's storage disk attached as an extra
+            // virtio-blk device. virtiofs can only share directories, not files,
+            // so we pass the ext4 disk image as a third block device (/dev/vdc).
+            let pack_vm_name = format!(
+                "__pack_fromvm_{}_{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+            );
+            let vm_data = smolvm::agent::vm_data_dir(&pack_vm_name);
+
+            println!("Starting agent VM to export layers...");
+            let manager = AgentManager::for_vm(&pack_vm_name)?;
+            let features = smolvm::agent::LaunchFeatures {
+                extra_disks: vec![(storage_path.clone(), false)],
+                ..Default::default()
+            };
+            manager.start_with_full_config(
+                Vec::new(),
+                Vec::new(),
+                VmResources {
+                    cpus: 4,
+                    memory_mib: 8192,
+                    network: true,
+                    network_backend: None,
+                    storage_gib: None,
+                    overlay_gib: None,
+                    allowed_cidrs: None,
+                },
+                features,
+            )?;
+
+            // Closure ensures the temp VM is always stopped, even on early errors
+            // (pull failure, export failure, etc.). Export errors propagate; stop
+            // failures are logged but don't mask the original error.
+            let export_result: smolvm::Result<()> = (|| {
+                let mut client = manager.connect()?;
+
+                // Mount the source VM's storage disk inside the guest.
+                // It appears as /dev/vdc (3rd block device after storage + overlay).
+                let (exit_code, _, stderr) = client.vm_exec(
+                    vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        "mkdir -p /mnt/source-storage && mount /dev/vdc /mnt/source-storage"
+                            .to_string(),
+                    ],
+                    vec![],
+                    None,
+                    None,
+                )?;
+                if exit_code != 0 {
+                    return Err(Error::agent(
+                        "mount source storage in temp VM",
+                        format!("mount failed (exit {}): {}", exit_code, stderr),
+                    ));
+                }
+
+                // Pull the same image (layers are cached on the source storage,
+                // but the agent needs the manifest to know the layer list).
+                let image_info = crate::cli::pull_with_progress(&mut client, &image, None)?;
+
+                // Export base image layers
+                println!("Exporting {} layers...", image_info.layer_count);
+                for (i, layer_digest) in image_info.layers.iter().enumerate() {
+                    let prefix = format!(
+                        "  Layer {}/{}: {}",
+                        i + 1,
+                        image_info.layer_count,
+                        &layer_digest[..std::cmp::min(19, layer_digest.len())]
+                    );
+                    print!("{}...", prefix);
+                    let _ = std::io::Write::flush(&mut std::io::stdout());
+                    let layer_file = collector.layer_staging_path(layer_digest);
+                    self.export_layer_to_file(
+                        &mut client,
+                        &image_info.digest,
+                        i,
+                        &layer_file,
+                        &prefix,
+                    )?;
+                    collector
+                        .register_layer(layer_digest)
+                        .map_err(|e| Error::agent("collect layers", e.to_string()))?;
+                }
+
+                // Export the container overlay upper dir as an additional layer.
+                // The source VM's storage disk is mounted at /mnt/source-storage.
+                let overlay_dir =
+                    format!("/mnt/source-storage/overlays/persistent-{}/upper", vm_name);
+                println!("Exporting container overlay...");
+                let overlay_digest = format!("sha256:overlay-{}", vm_name);
+                let overlay_layer_file = collector.layer_staging_path(&overlay_digest);
+
+                // Use the agent to tar the overlay dir
+                let (exit_code, _, stderr) = client.vm_exec(
+                    vec![
+                        "sh".to_string(),
+                        "-c".to_string(),
+                        format!(
+                            "if [ -d '{}' ] && [ \"$(ls -A '{}')\" ]; then \
+                             tar cf /tmp/overlay-export.tar -C '{}' . 2>/dev/null; \
+                             echo OVERLAY_OK; \
+                             else echo OVERLAY_EMPTY; fi",
+                            overlay_dir, overlay_dir, overlay_dir
+                        ),
+                    ],
+                    vec![],
+                    None,
+                    None,
+                )?;
+
+                if exit_code == 0 {
+                    // Download the tar from the temp VM
+                    let tar_data = client.read_file("/tmp/overlay-export.tar")?;
+                    if !tar_data.is_empty() {
+                        std::fs::write(&overlay_layer_file, &tar_data)
+                            .map_err(|e| Error::agent("write overlay layer", e.to_string()))?;
+                        collector
+                            .register_layer(&overlay_digest)
+                            .map_err(|e| Error::agent("register overlay layer", e.to_string()))?;
+                        println!("  Overlay layer: {} bytes", tar_data.len());
+                    }
+                } else {
+                    tracing::debug!(stderr = %stderr, "overlay export: no container changes found");
+                }
+
+                Ok(())
+            })();
+
+            // Always stop the temp VM and clean up
+            if let Err(e) = manager.stop() {
+                warn!(error = %e, "failed to stop pack temp VM");
+            }
+            let _ = std::fs::remove_dir_all(&vm_data);
+            export_result?;
+        } else {
+            // Bare VM: just collect base assets, no layers needed.
+            self.collect_base_assets(&mut collector)?;
+        }
+
+        // Add overlay template from VM (bare VM rootfs state)
         println!("Copying overlay disk ({})...", overlay_path.display());
         collector
             .add_overlay_template(&overlay_path)
@@ -418,7 +570,12 @@ impl PackCreateCmd {
             platform,
             host_platform,
         );
-        manifest.mode = PackMode::Vm;
+        if is_image_based {
+            manifest.mode = PackMode::Container;
+            manifest.image = vm.image.clone().unwrap_or_default();
+        } else {
+            manifest.mode = PackMode::Vm;
+        }
         manifest.cpus = pack_config.cpus;
         manifest.mem = pack_config.mem;
         // Smolfile > source VM record > default

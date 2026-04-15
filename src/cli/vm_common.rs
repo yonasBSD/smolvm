@@ -495,6 +495,7 @@ pub fn start_vm_named(name: &str) -> smolvm::Result<()> {
         ssh_agent_socket,
         dns_filter_hosts: record.dns_filter_hosts.clone(),
         packed_layers_dir: None,
+        extra_disks: Vec::new(),
     };
 
     // If machine was created from .smolmachine, extract layers to cache and

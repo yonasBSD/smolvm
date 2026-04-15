@@ -380,21 +380,11 @@ fn post_process_extraction(cache_dir: &Path, debug: bool) -> std::io::Result<()>
         if debug {
             eprintln!("debug: extracting OCI layers...");
         }
-        // On macOS, extract into a case-sensitive volume. On Linux, use
-        // the layers dir directly. If the volume can't be created (sandbox,
-        // hdiutil unavailable), fall back to direct extraction — this works
-        // for images without case-conflicting paths.
-        let extract_dir = match extraction_layers_dir(cache_dir, debug) {
-            Ok(dir) => dir,
-            Err(e) => {
-                eprintln!(
-                    "warning: case-sensitive volume unavailable ({}), \
-                     falling back to direct extraction",
-                    e
-                );
-                layers_dir.clone()
-            }
-        };
+        // On macOS, extract into a case-sensitive volume to preserve Linux
+        // paths that differ only in case. On Linux (ext4/xfs), the layers
+        // dir is already case-sensitive. If the volume can't be created on
+        // macOS, fail rather than silently corrupting case-colliding paths.
+        let extract_dir = extraction_layers_dir(cache_dir, debug)?;
 
         for entry in fs::read_dir(&layers_dir)? {
             let entry = entry?;
@@ -515,22 +505,14 @@ pub fn acquire_layers_lease(cache_dir: &Path, debug: bool) -> std::io::Result<La
     {
         let image_path = cache_dir.join(CS_IMAGE_NAME);
         if image_path.exists() || has_layer_tars(cache_dir) {
-            match acquire_lease(cache_dir, debug) {
-                Ok(path) => {
-                    return Ok(LayersVolumeLease {
-                        path,
-                        cache_dir: cache_dir.to_path_buf(),
-                    });
-                }
-                Err(e) => {
-                    // hdiutil unavailable or failed — fall back to direct
-                    // layers dir. Works for images without case conflicts.
-                    eprintln!(
-                        "warning: case-sensitive volume unavailable ({}), using layers dir",
-                        e
-                    );
-                }
-            }
+            // Case-sensitive volume is required on macOS to preserve Linux
+            // paths faithfully. Fail if it can't be acquired rather than
+            // silently falling back to case-insensitive extraction.
+            let path = acquire_lease(cache_dir, debug)?;
+            return Ok(LayersVolumeLease {
+                path,
+                cache_dir: cache_dir.to_path_buf(),
+            });
         }
     }
 
@@ -559,25 +541,14 @@ pub fn acquire_daemon_lease(
     {
         let image_path = cache_dir.join(CS_IMAGE_NAME);
         if image_path.exists() || has_layer_tars(cache_dir) {
-            let result = (|| -> std::io::Result<PathBuf> {
-                let leases_dir = cache_dir.join(LEASES_DIR);
-                fs::create_dir_all(&leases_dir)?;
-                let lock = lock_leases(cache_dir)?;
-                gc_stale_leases(&leases_dir);
-                ensure_cs_volume_mounted(cache_dir, debug)?;
-                fs::write(leases_dir.join("daemon"), format!("{}", daemon_pid))?;
-                drop(lock);
-                Ok(cache_dir.join(CS_MOUNT_DIR))
-            })();
-            match result {
-                Ok(path) => return Ok(path),
-                Err(e) => {
-                    eprintln!(
-                        "warning: case-sensitive volume unavailable ({}), using layers dir",
-                        e
-                    );
-                }
-            }
+            let leases_dir = cache_dir.join(LEASES_DIR);
+            fs::create_dir_all(&leases_dir)?;
+            let lock = lock_leases(cache_dir)?;
+            gc_stale_leases(&leases_dir);
+            ensure_cs_volume_mounted(cache_dir, debug)?;
+            fs::write(leases_dir.join("daemon"), format!("{}", daemon_pid))?;
+            drop(lock);
+            return Ok(cache_dir.join(CS_MOUNT_DIR));
         }
     }
 

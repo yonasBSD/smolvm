@@ -677,6 +677,114 @@ test_from_vm_cleanup() {
     return 0
 }
 
+# End-to-end test: --from-vm on an IMAGE-BASED VM captures container overlay.
+#
+# BUG-17 regression: `pack create --from-vm` for image-based VMs only captured
+# the base OCI layers, missing packages installed via apk/apt. The container
+# overlay (upper dir on the storage disk) wasn't exported. This test verifies
+# the full round-trip:
+#   1. Create image-based VM → install package → stop
+#   2. Pack with --from-vm (must export overlay as additional layer)
+#   3. Run packed binary — installed package must be present
+#   4. Create machine from .smolmachine — installed package must be present
+#   5. Stop/start machine — package persists across restart
+test_from_vm_image_overlay() {
+    local vm_name="from-vm-img-$$"
+    local pack_output="$TEST_DIR/from-vm-img-pack"
+    local machine_name="from-vm-img-machine-$$"
+
+    # Cleanup any leftovers
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+    $SMOLVM machine stop --name "$machine_name" 2>/dev/null || true
+    $SMOLVM machine delete "$machine_name" -f 2>/dev/null || true
+    rm -f "$pack_output" "$pack_output.smolmachine"
+
+    # 1. Create image-based VM, install curl, verify, stop
+    echo "  Step 1: Create image-based VM and install curl..."
+    $SMOLVM machine create "$vm_name" --image alpine:latest --net 2>&1 || return 1
+    $SMOLVM machine start --name "$vm_name" 2>&1 || {
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; return 1
+    }
+    $SMOLVM machine exec --name "$vm_name" -- apk add --no-cache curl 2>&1 || true
+    local which_result
+    which_result=$($SMOLVM machine exec --name "$vm_name" -- which curl 2>&1)
+    [[ "$which_result" == *"/usr/bin/curl"* ]] || {
+        echo "FAIL: curl not installed in source VM"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; return 1
+    }
+    $SMOLVM machine stop --name "$vm_name" 2>&1 || return 1
+
+    # 2. Pack with --from-vm (this must export the container overlay)
+    echo "  Step 2: Pack image-based VM with --from-vm..."
+    $SMOLVM pack create --from-vm "$vm_name" -o "$pack_output" 2>&1 || {
+        echo "FAIL: pack --from-vm failed"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; return 1
+    }
+    [[ -f "$pack_output.smolmachine" ]] || {
+        echo "FAIL: no .smolmachine sidecar produced"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; return 1
+    }
+
+    # 3. Run packed binary — curl must be present
+    echo "  Step 3: Verify packed binary has curl..."
+    local run_result
+    run_result=$(run_with_timeout 60 $SMOLVM pack run --sidecar "$pack_output.smolmachine" -- which curl 2>&1)
+    [[ "$run_result" == *"/usr/bin/curl"* ]] || {
+        echo "FAIL: curl not found in packed binary (got: $run_result)"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+        rm -f "$pack_output" "$pack_output.smolmachine"; return 1
+    }
+
+    # 4. Create machine from .smolmachine — curl must be present
+    echo "  Step 4: Create machine from .smolmachine and verify curl..."
+    $SMOLVM machine create "$machine_name" --from "$pack_output.smolmachine" --net 2>&1 || {
+        echo "FAIL: machine create --from failed"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+        rm -f "$pack_output" "$pack_output.smolmachine"; return 1
+    }
+    $SMOLVM machine start --name "$machine_name" 2>&1 || {
+        echo "FAIL: machine start failed"
+        $SMOLVM machine delete "$machine_name" -f 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+        rm -f "$pack_output" "$pack_output.smolmachine"; return 1
+    }
+    local exec_result
+    exec_result=$($SMOLVM machine exec --name "$machine_name" -- which curl 2>&1)
+    [[ "$exec_result" == *"/usr/bin/curl"* ]] || {
+        echo "FAIL: curl not found in machine from .smolmachine (got: $exec_result)"
+        $SMOLVM machine stop --name "$machine_name" 2>/dev/null
+        $SMOLVM machine delete "$machine_name" -f 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+        rm -f "$pack_output" "$pack_output.smolmachine"; return 1
+    }
+
+    # 5. Stop/start — curl persists
+    echo "  Step 5: Verify persistence across restart..."
+    $SMOLVM machine stop --name "$machine_name" 2>&1 || true
+    $SMOLVM machine start --name "$machine_name" 2>&1 || {
+        echo "FAIL: restart failed"
+        $SMOLVM machine delete "$machine_name" -f 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+        rm -f "$pack_output" "$pack_output.smolmachine"; return 1
+    }
+    exec_result=$($SMOLVM machine exec --name "$machine_name" -- which curl 2>&1)
+    [[ "$exec_result" == *"/usr/bin/curl"* ]] || {
+        echo "FAIL: curl not found after restart (got: $exec_result)"
+        $SMOLVM machine stop --name "$machine_name" 2>/dev/null
+        $SMOLVM machine delete "$machine_name" -f 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+        rm -f "$pack_output" "$pack_output.smolmachine"; return 1
+    }
+
+    # Cleanup
+    $SMOLVM machine stop --name "$machine_name" 2>/dev/null || true
+    $SMOLVM machine delete "$machine_name" -f 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+    rm -f "$pack_output" "$pack_output.smolmachine"
+}
+
 # =============================================================================
 # Case-Insensitive Collision Test (macOS regression)
 #
@@ -979,6 +1087,12 @@ if [[ "$QUICK_MODE" != "true" ]]; then
     run_test "from-vm: pack stopped VM" test_from_vm_pack || true
     run_test "from-vm: finds installed package" test_from_vm_run_finds_installed_package || true
     run_test "from-vm: cleanup" test_from_vm_cleanup || true
+
+    echo ""
+    echo "Running --from-vm Image-Based Tests (BUG-17 regression)..."
+    echo ""
+
+    run_test "from-vm-image: container overlay captured" test_from_vm_image_overlay || true
 fi
 
 # =============================================================================

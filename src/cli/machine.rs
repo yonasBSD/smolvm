@@ -390,6 +390,7 @@ impl RunCmd {
             ssh_agent_socket,
             dns_filter_hosts: params.dns_filter_hosts.clone(),
             packed_layers_dir: None,
+            extra_disks: Vec::new(),
         };
 
         let freshly_started = manager

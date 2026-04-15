@@ -52,4 +52,7 @@ pub struct BootConfig {
     /// Pre-extracted OCI layers directory for .smolmachine-sourced machines.
     #[serde(default)]
     pub packed_layers_dir: Option<PathBuf>,
+    /// Additional disk images to attach (path, read_only).
+    #[serde(default)]
+    pub extra_disks: Vec<(PathBuf, bool)>,
 }

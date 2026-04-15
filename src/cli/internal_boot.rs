@@ -110,6 +110,7 @@ pub fn run(config_path: PathBuf) -> smolvm::Result<()> {
         ssh_agent_socket: config.ssh_agent_socket.as_deref(),
         dns_filter_socket: dns_filter_socket_path.as_deref(),
         packed_layers_dir: config.packed_layers_dir.as_deref(),
+        extra_disks: &config.extra_disks,
     });
 
     // If we get here, launch_agent_vm returned (should only happen on error)
