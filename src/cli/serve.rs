@@ -212,9 +212,7 @@ impl ListenTarget {
 
         #[cfg(unix)]
         {
-            let path = value
-                .strip_prefix("unix://")
-                .unwrap_or(value);
+            let path = value.strip_prefix("unix://").unwrap_or(value);
             Ok(Self::Unix(PathBuf::from(path)))
         }
 
