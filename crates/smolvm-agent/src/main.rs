@@ -2318,6 +2318,9 @@ fn spawn_interactive_command(
         spec.add_bind_mount(&workspace_src.to_string_lossy(), "/workspace", false);
     }
 
+    // Forward SSH agent into the container if enabled at boot.
+    ssh_agent::inject_into_container(&mut spec);
+
     spec.write_to(&bundle_path)
         .map_err(|e| format!("failed to write OCI spec: {}", e))?;
 
@@ -2404,6 +2407,9 @@ fn spawn_interactive_command(
     if workspace_src.exists() {
         spec.add_bind_mount(&workspace_src.to_string_lossy(), "/workspace", false);
     }
+
+    // Forward SSH agent into the container if enabled at boot.
+    ssh_agent::inject_into_container(&mut spec);
 
     spec.write_to(&bundle_path)
         .map_err(|e| format!("failed to write OCI spec: {}", e))?;
@@ -3398,8 +3404,8 @@ fn handle_vm_exec_background(
             info!(pid = pid, "background process started");
             AgentResponse::Completed {
                 exit_code: 0,
-                stdout: format!("{}", pid),
-                stderr: String::new(),
+                stdout: format!("{}", pid).into_bytes(),
+                stderr: Vec::new(),
             }
         }
         Err(e) => AgentResponse::error(
@@ -3474,12 +3480,15 @@ fn handle_vm_exec(
     // long-term fix (streaming exec).
     const MAX_OUTPUT: usize = 16 * 1024 * 1024;
 
+    // Use read_to_end (not read_to_string) so binary output (image bytes,
+    // tarballs, any non-UTF-8 data) is preserved through the protocol.
+    // The protocol serializes Vec<u8> as base64 JSON string.
     let stdout_handle = child.stdout.take().map(|out| {
         std::thread::Builder::new()
             .name("exec-stdout".into())
             .spawn(move || {
-                let mut buf = String::new();
-                let _ = out.take(MAX_OUTPUT as u64).read_to_string(&mut buf);
+                let mut buf = Vec::new();
+                let _ = out.take(MAX_OUTPUT as u64).read_to_end(&mut buf);
                 buf
             })
     });
@@ -3488,8 +3497,8 @@ fn handle_vm_exec(
         std::thread::Builder::new()
             .name("exec-stderr".into())
             .spawn(move || {
-                let mut buf = String::new();
-                let _ = err.take(MAX_OUTPUT as u64).read_to_string(&mut buf);
+                let mut buf = Vec::new();
+                let _ = err.take(MAX_OUTPUT as u64).read_to_end(&mut buf);
                 buf
             })
     });

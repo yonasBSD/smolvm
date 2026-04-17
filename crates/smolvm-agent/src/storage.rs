@@ -1946,10 +1946,12 @@ pub fn cleanup_overlay(workload_id: &str) -> Result<()> {
 }
 
 /// Result of running a command.
+///
+/// Uses `Vec<u8>` so binary output is preserved end-to-end.
 pub struct RunResult {
     pub exit_code: i32,
-    pub stdout: String,
-    pub stderr: String,
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
 }
 
 /// Prepared rootfs info for a single ephemeral run.
@@ -2031,6 +2033,9 @@ pub fn run_command(
         if workspace_src.exists() {
             spec.add_bind_mount(&workspace_src.to_string_lossy(), "/workspace", false);
         }
+
+        // Forward SSH agent into the container if enabled at boot.
+        crate::ssh_agent::inject_into_container(&mut spec);
 
         // Write config.json to bundle
         spec.write_to(&bundle_path)
@@ -2283,13 +2288,14 @@ fn run_with_crun(
                 timeout_ms = timeout_ms,
                 "container timed out"
             );
+            let mut stderr = output.stderr;
+            stderr.extend_from_slice(
+                format!("\ncontainer timed out after {}ms", timeout_ms).as_bytes(),
+            );
             Ok(RunResult {
                 exit_code: TIMEOUT_EXIT_CODE,
                 stdout: output.stdout,
-                stderr: format!(
-                    "{}\ncontainer timed out after {}ms",
-                    output.stderr, timeout_ms
-                ),
+                stderr,
             })
         }
         WaitResult::ClientDisconnected { output } => {
@@ -2301,10 +2307,12 @@ fn run_with_crun(
                 container_id = %container_id,
                 "container killed — client disconnected"
             );
+            let mut stderr = output.stderr;
+            stderr.extend_from_slice(b"\ncontainer killed: client disconnected");
             Ok(RunResult {
                 exit_code: 129, // SIGHUP convention for disconnect
                 stdout: output.stdout,
-                stderr: format!("{}\ncontainer killed: client disconnected", output.stderr),
+                stderr,
             })
         }
     }
