@@ -19,13 +19,13 @@ echo "  smolvm Virtio-Net Tests"
 echo "=========================================="
 echo ""
 
-test_machine_create_virtio_works() {
+test_machine_create_virtio_net_works() {
     cleanup_machine
     local vm_name="virtio-create-test-$$"
     local output
 
-    output=$($SMOLVM machine create "$vm_name" --net --net-backend virtio 2>&1) || {
-        echo "expected virtio machine create to succeed"
+    output=$($SMOLVM machine create "$vm_name" --net --net-backend virtio-net 2>&1) || {
+        echo "expected virtio-net machine create to succeed"
         echo "$output"
         $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
         return 1
@@ -34,7 +34,7 @@ test_machine_create_virtio_works() {
     local list_output
     list_output=$($SMOLVM machine ls --json 2>&1)
     [[ "$list_output" == *"$vm_name"* ]] || {
-        echo "virtio create should persist machine state"
+        echo "virtio-net create should persist machine state"
         $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
         return 1
     }
@@ -42,14 +42,14 @@ test_machine_create_virtio_works() {
     $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
 }
 
-test_machine_run_virtio_rejected_until_implemented() {
+test_machine_run_virtio_net_rejected_until_implemented() {
     cleanup_machine
     local exit_code=0
     local output
 
-    output=$($SMOLVM machine run --net --net-backend virtio -- true 2>&1) || exit_code=$?
+    output=$($SMOLVM machine run --net --net-backend virtio-net -- true 2>&1) || exit_code=$?
     [[ $exit_code -ne 0 ]] || {
-        echo "expected run failure for unsupported virtio backend"
+        echo "expected run failure for unsupported virtio-net backend"
         return 1
     }
     [[ "$output" == *"not ready yet on this branch"* ]] || {
@@ -58,15 +58,15 @@ test_machine_run_virtio_rejected_until_implemented() {
     }
 }
 
-test_machine_create_virtio_ports_rejected() {
+test_machine_create_virtio_net_ports_rejected() {
     cleanup_machine
     local vm_name="virtio-ports-test-$$"
     local exit_code=0
     local output
 
-    output=$($SMOLVM machine create "$vm_name" --net --net-backend virtio -p 18080:80 2>&1) || exit_code=$?
+    output=$($SMOLVM machine create "$vm_name" --net --net-backend virtio-net -p 18080:80 2>&1) || exit_code=$?
     [[ $exit_code -ne 0 ]] || {
-        echo "expected create failure for virtio published port request"
+        echo "expected create failure for virtio-net published port request"
         $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
         return 1
     }
@@ -76,15 +76,15 @@ test_machine_create_virtio_ports_rejected() {
     }
 }
 
-test_machine_create_virtio_policy_rejected() {
+test_machine_create_virtio_net_policy_rejected() {
     cleanup_machine
     local vm_name="virtio-policy-test-$$"
     local exit_code=0
     local output
 
-    output=$($SMOLVM machine create "$vm_name" --net --net-backend virtio --allow-cidr 1.1.1.1/32 2>&1) || exit_code=$?
+    output=$($SMOLVM machine create "$vm_name" --net --net-backend virtio-net --allow-cidr 1.1.1.1/32 2>&1) || exit_code=$?
     [[ $exit_code -ne 0 ]] || {
-        echo "expected create failure for virtio policy request"
+        echo "expected create failure for virtio-net policy request"
         $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
         return 1
     }
@@ -94,7 +94,7 @@ test_machine_create_virtio_policy_rejected() {
     }
 }
 
-test_pack_run_virtio_rejected_until_implemented() {
+test_pack_run_virtio_net_rejected_until_implemented() {
     local output_path="$TEST_DIR/virtio-pack"
     local exit_code=0
     local output
@@ -103,9 +103,9 @@ test_pack_run_virtio_rejected_until_implemented() {
         $SMOLVM pack create --image alpine:latest -o "$output_path" >/dev/null 2>&1 || return 1
     fi
 
-    output=$($SMOLVM pack run --sidecar "$output_path.smolmachine" --net --net-backend virtio -- true 2>&1) || exit_code=$?
+    output=$($SMOLVM pack run --sidecar "$output_path.smolmachine" --net --net-backend virtio-net -- true 2>&1) || exit_code=$?
     [[ $exit_code -ne 0 ]] || {
-        echo "expected pack run failure for unsupported virtio backend"
+        echo "expected pack run failure for unsupported virtio-net backend"
         return 1
     }
     [[ "$output" == *"not ready yet on this branch"* ]] || {
@@ -114,10 +114,10 @@ test_pack_run_virtio_rejected_until_implemented() {
     }
 }
 
-run_test "Machine create: virtio works" test_machine_create_virtio_works || true
-run_test "Machine run: virtio rejected until implemented" test_machine_run_virtio_rejected_until_implemented || true
-run_test "Machine create: virtio + published ports rejected" test_machine_create_virtio_ports_rejected || true
-run_test "Machine create: virtio + policy rejected" test_machine_create_virtio_policy_rejected || true
-run_test "Pack run: virtio rejected until implemented" test_pack_run_virtio_rejected_until_implemented || true
+run_test "Machine create: virtio-net works" test_machine_create_virtio_net_works || true
+run_test "Machine run: virtio-net rejected until implemented" test_machine_run_virtio_net_rejected_until_implemented || true
+run_test "Machine create: virtio-net + published ports rejected" test_machine_create_virtio_net_ports_rejected || true
+run_test "Machine create: virtio-net + policy rejected" test_machine_create_virtio_net_policy_rejected || true
+run_test "Pack run: virtio-net rejected until implemented" test_pack_run_virtio_net_rejected_until_implemented || true
 
 print_summary "Virtio-Net Tests"

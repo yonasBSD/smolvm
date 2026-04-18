@@ -10,6 +10,7 @@ use crate::error::{Error, Result};
 use crate::storage::{OverlayDisk, StorageDisk};
 use crate::util::libkrunfw_filename;
 
+use smolvm_network::guest_env;
 use smolvm_protocol::ports;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
@@ -591,7 +592,7 @@ pub fn launch_agent_vm(config: &LaunchConfig<'_>) -> Result<()> {
 
         // Tell the agent to start DNS filtering proxy
         if dns_filter_socket.is_some() {
-            env_strings.push(cstr("SMOLVM_DNS_FILTER=1"));
+            env_strings.push(cstr(&format!("{}=1", guest_env::DNS_FILTER)));
         }
 
         // Tell the agent about pre-extracted packed layers

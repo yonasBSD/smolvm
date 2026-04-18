@@ -53,6 +53,7 @@
 
 pub mod device;
 pub mod frame_stream;
+pub mod guest_env;
 pub mod queues;
 pub mod stack;
 pub mod tcp_relay;

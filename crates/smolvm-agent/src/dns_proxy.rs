@@ -13,6 +13,7 @@
 //!
 //! The host responds with the same framing.
 
+use smolvm_network::guest_env;
 use smolvm_protocol::ports;
 use std::io::{self, Read, Write};
 use std::net::UdpSocket;
@@ -45,7 +46,7 @@ pub fn start() {
 /// Check if DNS filtering is enabled via environment variable.
 /// The host sets this when `--allow-host` is used.
 pub fn is_enabled() -> bool {
-    std::env::var("SMOLVM_DNS_FILTER").as_deref() == Ok("1")
+    std::env::var(guest_env::DNS_FILTER).as_deref() == Ok("1")
 }
 
 fn run_proxy() -> io::Result<()> {

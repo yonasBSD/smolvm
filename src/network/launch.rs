@@ -38,10 +38,10 @@ impl NetworkFallbackReason {
                 "virtio-net has not been implemented in this branch yet"
             }
             Self::PortsRequireTsi => {
-                "port publishing still uses the TSI backend; falling back from virtio"
+                "port publishing still uses the TSI backend; falling back from virtio-net"
             }
             Self::PolicyRequiresTsi => {
-                "allow-cidr/allow-host policies still use the TSI backend; falling back from virtio"
+                "allow-cidr/allow-host policies still use the TSI backend; falling back from virtio-net"
             }
         }
     }
@@ -148,7 +148,7 @@ pub fn validate_requested_network_backend(
     if !wants_network {
         return Err(crate::Error::config(
             "--net-backend",
-            "--net-backend virtio requires --net",
+            "--net-backend virtio-net requires --net",
         ));
     }
 

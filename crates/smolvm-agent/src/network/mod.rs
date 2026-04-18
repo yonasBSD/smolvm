@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! host launcher
-//!   -> decides backend = virtio
+//!   -> decides backend = virtio-net
 //!   -> chooses guest IP / gateway / DNS / MAC
 //!   -> exports SMOLVM_NETWORK_* env
 //!   -> starts guest agent
@@ -47,6 +47,7 @@
 //! The Linux-specific implementation lives in `linux.rs`. Non-Linux guests
 //! currently return an explicit error instead of attempting a partial setup.
 
+use smolvm_network::guest_env;
 use std::net::Ipv4Addr;
 
 /// Configure the guest network interface from host-provided environment.
@@ -57,7 +58,7 @@ use std::net::Ipv4Addr;
 /// --------------------
 ///
 /// The host launcher currently provides:
-/// - `SMOLVM_NETWORK_BACKEND=virtio`
+/// - `SMOLVM_NETWORK_BACKEND=virtio-net`
 /// - `SMOLVM_NETWORK_GUEST_IP`
 /// - `SMOLVM_NETWORK_GATEWAY`
 /// - `SMOLVM_NETWORK_PREFIX_LEN`
@@ -67,7 +68,7 @@ use std::net::Ipv4Addr;
 /// Example:
 ///
 /// ```text
-/// SMOLVM_NETWORK_BACKEND=virtio
+/// SMOLVM_NETWORK_BACKEND=virtio-net
 /// SMOLVM_NETWORK_GUEST_IP=10.0.2.15
 /// SMOLVM_NETWORK_GATEWAY=10.0.2.2
 /// SMOLVM_NETWORK_PREFIX_LEN=24
@@ -92,23 +93,24 @@ use std::net::Ipv4Addr;
 ///   or malformed, so boot should fail instead of continuing with a
 ///   half-configured NIC.
 pub fn configure_from_env() -> Result<bool, String> {
-    let backend = match std::env::var("SMOLVM_NETWORK_BACKEND") {
+    let backend = match std::env::var(guest_env::BACKEND) {
         Ok(value) if !value.is_empty() => value,
         _ => return Ok(false),
     };
 
-    if backend != "virtio" {
+    if backend != guest_env::BACKEND_VIRTIO_NET {
         return Err(format!(
-            "unsupported SMOLVM_NETWORK_BACKEND value: {}",
+            "unsupported {} value: {}",
+            guest_env::BACKEND,
             backend
         ));
     }
 
-    let guest_ip = env_ipv4("SMOLVM_NETWORK_GUEST_IP")?;
-    let gateway = env_ipv4("SMOLVM_NETWORK_GATEWAY")?;
-    let prefix_len = env_u8("SMOLVM_NETWORK_PREFIX_LEN")?;
-    let guest_mac = env_mac("SMOLVM_NETWORK_GUEST_MAC")?;
-    let dns_server = env_ipv4("SMOLVM_NETWORK_DNS")?;
+    let guest_ip = env_ipv4(guest_env::GUEST_IP)?;
+    let gateway = env_ipv4(guest_env::GATEWAY)?;
+    let prefix_len = env_u8(guest_env::PREFIX_LEN)?;
+    let guest_mac = env_mac(guest_env::GUEST_MAC)?;
+    let dns_server = env_ipv4(guest_env::DNS)?;
 
     linux::configure_interface(
         "eth0", guest_mac, 1500, guest_ip, prefix_len, gateway, dns_server,
