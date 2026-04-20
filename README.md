@@ -49,7 +49,7 @@ Use This For
 
 ```bash
 # network is off by default — untrusted code can't phone home
-smolvm machine run --image alpine -- ping -c 1 1.1.1.1
+smolvm machine run --image alpine -- nslookup example.com
 # fails — no network access
 
 # lock down egress — only allow specific hosts
