@@ -1172,11 +1172,10 @@ test_machine_run_workdir() {
     [[ "$output" == *"/tmp"* ]]
 }
 
-# Regression for issue #169: image WorkingDir should flow into the actual
-# image-backed runtime when no explicit -w/--workdir is provided. The original
-# issue used an x86-only image, so this uses the multi-arch Redis image, which
-# sets WORKDIR /data.
-test_machine_run_image_default_workdir_issue_169() {
+# Regression: image WorkingDir should flow into the actual image-backed
+# runtime when no explicit -w/--workdir is provided. Use the multi-arch Redis
+# image because it sets WORKDIR /data.
+test_machine_run_image_default_workdir() {
     local output exit_code=0
     output=$(run_with_timeout 180 \
         "$SMOLVM" machine run -I docker.io/library/redis:7.4 --net -- \
@@ -1185,7 +1184,7 @@ test_machine_run_image_default_workdir_issue_169() {
     if [[ $exit_code -ne 0 ]]; then
         case "$output" in
             *"no matching manifest"*|*"exec format error"*|*"platform"* )
-                log_skip "Skipping issue #169 workdir regression: image unsupported on this host"
+                log_skip "Skipping image default workdir regression: image unsupported on this host"
                 return 0
                 ;;
         esac
@@ -1199,6 +1198,37 @@ test_machine_run_image_default_workdir_issue_169() {
     pwd_result=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
     [[ "$pwd_result" == "/data" ]] || {
         echo "expected image workdir /data, got: $pwd_result"
+        echo "$output"
+        return 1
+    }
+}
+
+# Regression: image User should flow into the actual image-backed runtime
+# when no explicit override is provided. Use a multi-arch unprivileged NGINX
+# image because it sets USER 101.
+test_machine_run_image_default_user() {
+    local output exit_code=0
+    output=$(run_with_timeout 180 \
+        "$SMOLVM" machine run -I docker.io/nginxinc/nginx-unprivileged:stable-alpine --net -- \
+        sh -lc "id -u") || exit_code=$?
+
+    if [[ $exit_code -ne 0 ]]; then
+        case "$output" in
+            *"no matching manifest"*|*"exec format error"*|*"platform"*|*"not found"* )
+                log_skip "Skipping image default user regression: image unsupported on this host"
+                return 0
+                ;;
+        esac
+
+        echo "machine run failed:"
+        echo "$output"
+        return 1
+    fi
+
+    local user_result
+    user_result=$(printf '%s\n' "$output" | tail -n 1 | tr -d '\r')
+    [[ "$user_result" == "101" ]] || {
+        echo "expected image user id 101, got: $user_result"
         echo "$output"
         return 1
     }
@@ -1411,7 +1441,8 @@ run_test "Machine run: env variable" test_machine_run_env || true
 run_test "Machine run: volume mount" test_machine_run_volume || true
 run_test "Machine run: volume readonly" test_machine_run_volume_readonly || true
 run_test "Machine run: workdir" test_machine_run_workdir || true
-run_test "Machine run: image default workdir issue #169" test_machine_run_image_default_workdir_issue_169 || true
+run_test "Machine run: image default workdir" test_machine_run_image_default_workdir || true
+run_test "Machine run: image default user" test_machine_run_image_default_user || true
 run_test "Machine run: detached" test_machine_run_detached || true
 run_test "Machine run: timeout" test_machine_run_timeout || true
 run_test "Bare VM: /workspace exists" test_bare_vm_workspace || true
