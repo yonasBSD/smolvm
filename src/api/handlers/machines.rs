@@ -921,7 +921,7 @@ mod tests {
     #[allow(dead_code)]
     fn setup_test_state() -> (TempDir, Arc<ApiState>) {
         let dir = TempDir::new().expect("failed to create temp dir");
-        let db_path = dir.path().join("test.redb");
+        let db_path = dir.path().join("test.db");
         let db = SmolvmDb::open_at(&db_path).expect("failed to open test db");
         let state = Arc::new(ApiState::with_db(db));
         (dir, state)

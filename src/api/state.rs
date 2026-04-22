@@ -843,7 +843,7 @@ mod tests {
     /// Create an ApiState with a temporary database for testing.
     fn temp_api_state() -> (TempDir, ApiState) {
         let dir = TempDir::new().unwrap();
-        let path = dir.path().join("test.redb");
+        let path = dir.path().join("test.db");
         let db = SmolvmDb::open_at(&path).unwrap();
         (dir, ApiState::with_db(db))
     }
