@@ -418,7 +418,7 @@ test_api_create_from_smolmachine() {
 
     # Create via API with from field
     local create_resp
-    create_resp=$(curl -s -X POST "$API_URL/api/v1/machines" \
+    create_resp=$("${CURL[@]}" -s -X POST "$API_URL/api/v1/machines" \
         -H "Content-Type: application/json" \
         -d "{\"name\": \"$vm_name\", \"from\": \"$sidecar\", \"memoryMb\": 512}")
     echo "$create_resp" | grep -q "$vm_name" || {
@@ -428,34 +428,34 @@ test_api_create_from_smolmachine() {
 
     # Start
     local start_resp
-    start_resp=$(curl -s -X POST "$API_URL/api/v1/machines/$vm_name/start")
+    start_resp=$("${CURL[@]}" -s -X POST "$API_URL/api/v1/machines/$vm_name/start")
     echo "$start_resp" | grep -q "running" || {
         echo "FAIL: start failed: $start_resp"
-        curl -s -X DELETE "$API_URL/api/v1/machines/$vm_name" >/dev/null
+        "${CURL[@]}" -s -X DELETE "$API_URL/api/v1/machines/$vm_name" >/dev/null
         rm -rf "$tmpdir"; return 1
     }
 
     # Exec
     local exec_resp
-    exec_resp=$(curl -s -X POST "$API_URL/api/v1/machines/$vm_name/exec" \
+    exec_resp=$("${CURL[@]}" -s -X POST "$API_URL/api/v1/machines/$vm_name/exec" \
         -H "Content-Type: application/json" \
         -d '{"command": ["echo", "api-from-ok"]}')
     echo "$exec_resp" | grep -q "api-from-ok" || {
         echo "FAIL: exec failed: $exec_resp"
-        curl -s -X POST "$API_URL/api/v1/machines/$vm_name/stop" >/dev/null
-        curl -s -X DELETE "$API_URL/api/v1/machines/$vm_name" >/dev/null
+        "${CURL[@]}" -s -X POST "$API_URL/api/v1/machines/$vm_name/stop" >/dev/null
+        "${CURL[@]}" -s -X DELETE "$API_URL/api/v1/machines/$vm_name" >/dev/null
         rm -rf "$tmpdir"; return 1
     }
 
     # Cleanup
-    curl -s -X POST "$API_URL/api/v1/machines/$vm_name/stop" >/dev/null
-    curl -s -X DELETE "$API_URL/api/v1/machines/$vm_name" >/dev/null
+    "${CURL[@]}" -s -X POST "$API_URL/api/v1/machines/$vm_name/stop" >/dev/null
+    "${CURL[@]}" -s -X DELETE "$API_URL/api/v1/machines/$vm_name" >/dev/null
     rm -rf "$tmpdir"
 }
 
 test_api_from_and_image_conflict() {
     local resp
-    resp=$(curl -s -X POST "$API_URL/api/v1/machines" \
+    resp=$("${CURL[@]}" -s -X POST "$API_URL/api/v1/machines" \
         -H "Content-Type: application/json" \
         -d '{"from": "/tmp/test.smolmachine", "image": "alpine"}')
     echo "$resp" | grep -q "mutually exclusive" || {
@@ -466,7 +466,7 @@ test_api_from_and_image_conflict() {
 
 test_api_from_nonexistent_sidecar() {
     local resp
-    resp=$(curl -s -X POST "$API_URL/api/v1/machines" \
+    resp=$("${CURL[@]}" -s -X POST "$API_URL/api/v1/machines" \
         -H "Content-Type: application/json" \
         -d '{"from": "/nonexistent/file.smolmachine"}')
     echo "$resp" | grep -q "not found" || {
