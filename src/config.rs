@@ -3,7 +3,7 @@
 //! This module handles persistent configuration storage for smolvm,
 //! including default settings and VM registry.
 //!
-//! State is persisted to a redb database at `~/.local/share/smolvm/server/smolvm.redb`.
+//! State is persisted to a SQLite database at `~/.local/share/smolvm/server/smolvm.db`.
 //! For backward compatibility, `SmolvmConfig` maintains an in-memory cache of VMs
 //! and provides the same API as the old confy-based implementation.
 
@@ -149,7 +149,7 @@ impl RestartConfig {
 /// Global smolvm configuration with database-backed persistence.
 ///
 /// This struct provides backward-compatible access to VM records while
-/// using redb for ACID-compliant storage. The `vms` field is an in-memory
+/// using SQLite for ACID-compliant storage. The `vms` field is an in-memory
 /// cache that is kept in sync with the database.
 #[derive(Debug, Clone)]
 pub struct SmolvmConfig {
