@@ -44,6 +44,13 @@ fn validate_storage_id(value: &str, context: &str) -> Result<()> {
         });
     }
 
+    if value.contains('/') || value.contains('\\') {
+        return Err(StorageError::ValidationFailed {
+            context: context.to_string(),
+            reason: "path separators are not allowed".to_string(),
+        });
+    }
+
     let path = Path::new(value);
     for component in path.components() {
         match component {
@@ -2052,6 +2059,7 @@ pub fn run_command(
         let identity = crate::oci::resolve_process_identity(Path::new(&prepared.rootfs_path), user)
             .map_err(StorageError::new)?;
         let mut spec = OciSpec::new(command, env, workdir_str, false, &identity);
+        spec.add_gpu_devices_if_available();
 
         // Add virtiofs bind mounts to OCI spec
         for (tag, container_path, read_only) in mounts {
