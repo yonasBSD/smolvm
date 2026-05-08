@@ -297,17 +297,18 @@ impl SmolvmConfig {
     }
 
     /// Update a VM record in place (persists immediately to database).
-    pub fn update_vm<F>(&mut self, id: &str, f: F) -> Option<()>
+    ///
+    /// Returns `None` if the record doesn't exist, `Some(Err)` if the DB write
+    /// fails, `Some(Ok)` on success. Callers that need fail-closed semantics
+    /// should check both.
+    pub fn update_vm<F>(&mut self, id: &str, f: F) -> Option<crate::Result<()>>
     where
         F: FnOnce(&mut VmRecord),
     {
         if let Some(record) = self.vms.get_mut(id) {
             f(record);
             // Persist to database
-            if let Err(e) = self.db.insert_vm(id, record) {
-                tracing::warn!(error = %e, vm = %id, "failed to persist VM update");
-            }
-            Some(())
+            Some(self.db.insert_vm(id, record))
         } else {
             None
         }

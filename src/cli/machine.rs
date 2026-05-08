@@ -584,31 +584,21 @@ impl RunCmd {
                 params.workdir.as_deref(),
             );
             if self.detach {
-                // Detach mode: pull the image, kick the command off in the
-                // background inside the image's overlay rootfs, and persist
-                // the record so subsequent `machine exec` sessions see the
-                // same filesystem (same overlay ID as the exec path below).
-                crate::cli::pull_with_progress(&mut client, img, self.oci_platform.as_deref())?;
-
-                // Run the resolved command in the background inside the image.
-                // Skip when the command is just the idle default — there's
-                // nothing useful to dispatch.
-                let is_idle = command.is_empty()
-                    || command
-                        == DEFAULT_IDLE_CMD
-                            .iter()
-                            .map(|s| s.to_string())
-                            .collect::<Vec<_>>();
-                if !is_idle {
-                    let bg_config = smolvm::agent::RunConfig::new(img, command.clone())
-                        .with_env(env.clone())
-                        .with_workdir(params.workdir.clone())
+                // Start the main workload container first. If this fails, the
+                // VM is stopped and no DB record is written — a retry won't
+                // hit "machine already exists."
+                {
+                    let run_config = smolvm::agent::RunConfig::new(img.clone(), command.clone())
+                        .with_env(defaults.env.clone())
+                        .with_workdir(defaults.workdir.clone())
+                        .with_user(defaults.user.clone())
                         .with_mounts(mount_bindings.clone())
-                        .with_persistent_overlay(Some("default".to_string()));
-                    let pid = client.run_background(bg_config)?;
-                    tracing::info!(pid = pid, "background workload started");
+                        .with_persistent_overlay(Some(vm_name.clone()));
+                    client.run_container_detached(run_config)?;
                 }
 
+                // Container started — persist the DB record. If this fails,
+                // stop the VM to avoid an orphan that lifecycle commands can't find.
                 {
                     use smolvm::config::SmolvmConfig;
                     use vm_common::DefaultVmOverrides;
@@ -624,7 +614,7 @@ impl RunCmd {
                         .collect();
                     let port_tuples: Vec<(u16, u16)> =
                         params.port.iter().map(|p| (p.host, p.guest)).collect();
-                    if let Ok(mut config) = SmolvmConfig::load() {
+                    let persist_result = SmolvmConfig::load().and_then(|mut config| {
                         vm_common::persist_named_running(
                             &mut config,
                             &vm_name,
@@ -648,7 +638,14 @@ impl RunCmd {
                                 ssh_agent: self.ssh_agent || params.ssh_agent,
                                 dns_filter_hosts: params.dns_filter_hosts.clone(),
                             }),
-                        );
+                        )
+                    });
+                    if let Err(e) = persist_result {
+                        let _ = manager.stop();
+                        return Err(Error::config(
+                            "persist machine record",
+                            format!("VM started but record could not be saved: {}. VM stopped to avoid orphan.", e),
+                        ));
                     }
                 }
 
@@ -744,32 +741,31 @@ impl RunCmd {
                         .collect();
                     let port_tuples: Vec<(u16, u16)> =
                         params.port.iter().map(|p| (p.host, p.guest)).collect();
-                    if let Ok(mut config) = SmolvmConfig::load() {
-                        vm_common::persist_named_running(
-                            &mut config,
-                            &vm_name,
-                            manager.child_pid(),
-                            Some(DefaultVmOverrides {
-                                cpus: params.cpus,
-                                mem: params.mem,
-                                mounts: mount_tuples,
-                                ports: port_tuples,
-                                network: params.net,
-                                network_backend: params.network_backend,
-                                storage_gb: params.storage_gb,
-                                overlay_gb: params.overlay_gb,
-                                allowed_cidrs: params.allowed_cidrs.clone(),
-                                init: params.init.clone(),
-                                env: parse_env_list(&params.env),
-                                workdir: params.workdir.clone(),
-                                image: None,
-                                entrypoint: params.entrypoint.clone(),
-                                cmd: params.cmd.clone(),
-                                ssh_agent: self.ssh_agent || params.ssh_agent,
-                                dns_filter_hosts: params.dns_filter_hosts.clone(),
-                            }),
-                        );
-                    }
+                    let mut config = SmolvmConfig::load()?;
+                    vm_common::persist_named_running(
+                        &mut config,
+                        &vm_name,
+                        manager.child_pid(),
+                        Some(DefaultVmOverrides {
+                            cpus: params.cpus,
+                            mem: params.mem,
+                            mounts: mount_tuples,
+                            ports: port_tuples,
+                            network: params.net,
+                            network_backend: params.network_backend,
+                            storage_gb: params.storage_gb,
+                            overlay_gb: params.overlay_gb,
+                            allowed_cidrs: params.allowed_cidrs.clone(),
+                            init: params.init.clone(),
+                            env: parse_env_list(&params.env),
+                            workdir: params.workdir.clone(),
+                            image: None,
+                            entrypoint: params.entrypoint.clone(),
+                            cmd: params.cmd.clone(),
+                            ssh_agent: self.ssh_agent || params.ssh_agent,
+                            dns_filter_hosts: params.dns_filter_hosts.clone(),
+                        }),
+                    )?;
                 }
 
                 if vm_name == "default" {

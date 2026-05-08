@@ -2104,6 +2104,14 @@ pub fn run_command(
         spec.write_to(&bundle_path)
             .map_err(|e| StorageError::new(format!("failed to write OCI spec: {}", e)))?;
 
+        // If a main workload container is running for this overlay, join it
+        // via crun exec instead of creating a fresh isolated container.
+        if let Some(cid) = crate::resolve_main_container(persistent_overlay_id) {
+            let result = run_exec_in_container(&cid, command, env, workdir, timeout_ms, client_fd);
+            let _ = mounted_paths;
+            return result;
+        }
+
         // Generate unique container ID for this execution
         let container_id = generate_container_id();
 
@@ -2365,6 +2373,65 @@ fn is_mountpoint(path: &Path) -> bool {
 ///
 /// This uses `crun run` which creates, starts, waits, and deletes the container
 /// in a single operation. Stdout and stderr are captured.
+/// Join a running container via `crun exec` (non-interactive).
+fn run_exec_in_container(
+    container_id: &str,
+    command: &[String],
+    env: &[(String, String)],
+    workdir: Option<&str>,
+    timeout_ms: Option<u64>,
+    client_fd: Option<std::os::unix::io::RawFd>,
+) -> Result<RunResult> {
+    info!(container_id = %container_id, command = ?command, "joining container via crun exec");
+
+    let mut child = CrunCommand::exec(container_id, env, command, workdir, false)
+        .stdin_null()
+        .capture_output()
+        .spawn()
+        .map_err(|e| StorageError::new(format!("crun exec failed: {}", e)))?;
+
+    // On timeout/disconnect, kill only the exec'd process — NOT the main
+    // container. The main container hosts the shared namespace for all execs;
+    // a timed-out `exec -- sleep 10` must not destroy the workload.
+    let exec_pid = child.id();
+    let result = crate::process::wait_with_timeout_cleanup_and_liveness(
+        &mut child,
+        timeout_ms,
+        client_fd,
+        || unsafe {
+            libc::kill(exec_pid as libc::pid_t, libc::SIGKILL);
+        },
+    )?;
+
+    match result {
+        WaitResult::Completed { exit_code, output } => Ok(RunResult {
+            exit_code,
+            stdout: output.stdout,
+            stderr: output.stderr,
+        }),
+        WaitResult::TimedOut { output, timeout_ms } => {
+            let mut stderr = output.stderr;
+            stderr.extend_from_slice(
+                format!("\ncommand timed out after {}ms", timeout_ms).as_bytes(),
+            );
+            Ok(RunResult {
+                exit_code: 124,
+                stdout: output.stdout,
+                stderr,
+            })
+        }
+        WaitResult::ClientDisconnected { output } => {
+            let mut stderr = output.stderr;
+            stderr.extend_from_slice(b"\nclient disconnected");
+            Ok(RunResult {
+                exit_code: 137,
+                stdout: output.stdout,
+                stderr,
+            })
+        }
+    }
+}
+
 fn run_with_crun(
     bundle_dir: &Path,
     container_id: &str,
