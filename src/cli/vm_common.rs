@@ -749,7 +749,7 @@ pub fn persist_named_running(
     name: &str,
     pid: Option<i32>,
     overrides: Option<DefaultVmOverrides>,
-) {
+) -> smolvm::Result<()> {
     if config.get_vm(name).is_none() {
         let record = VmRecord::new(
             name.to_string(),
@@ -759,13 +759,10 @@ pub fn persist_named_running(
             vec![],
             false,
         );
-        if let Err(e) = config.insert_vm(name.to_string(), record) {
-            tracing::warn!(error = %e, vm = %name, "failed to insert VM record");
-            return;
-        }
+        config.insert_vm(name.to_string(), record)?;
     }
     let pid_start_time = pid.and_then(smolvm::process::process_start_time);
-    if config
+    config
         .update_vm(name, |r| {
             r.state = RecordState::Running;
             r.pid = pid;
@@ -790,10 +787,14 @@ pub fn persist_named_running(
                 r.dns_filter_hosts = o.dns_filter_hosts.clone();
             }
         })
-        .is_none()
-    {
-        tracing::warn!(vm = %name, "failed to update VM record (record missing after insert)");
-    }
+        .ok_or_else(|| smolvm::Error::config(
+            "persist machine record",
+            format!("VM record for '{}' missing after insert", name),
+        ))?
+        // Flatten: Option<Result<()>> → the ok_or_else above handles None,
+        // now propagate the inner Result (DB write failure).
+        ?;
+    Ok(())
 }
 
 /// Config overrides for a VM record.
@@ -876,7 +877,7 @@ pub fn start_vm_default() -> smolvm::Result<()> {
     manager.ensure_running()?;
 
     let mut config = SmolvmConfig::load()?;
-    persist_named_running(&mut config, "default", manager.child_pid(), None);
+    persist_named_running(&mut config, "default", manager.child_pid(), None)?;
 
     // Pull image (if persisted via `machine run -d -s`) before running
     // init, then run init through the shared runner — same fix as

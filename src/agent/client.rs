@@ -1042,6 +1042,7 @@ impl AgentClient {
             timeout_ms,
             interactive: false,
             tty: false,
+            detached: false,
             persistent_overlay_id: config.persistent_overlay_id,
             background: false,
         })?;
@@ -1065,6 +1066,7 @@ impl AgentClient {
             timeout_ms: None,
             interactive: false,
             tty: false,
+            detached: false,
             persistent_overlay_id: config.persistent_overlay_id,
             background: true,
         })?;
@@ -1106,12 +1108,57 @@ impl AgentClient {
                 timeout_ms,
                 interactive: true,
                 tty,
+                detached: false,
                 persistent_overlay_id: config.persistent_overlay_id,
                 background: false,
             },
             tty,
             "run interactive",
         )
+    }
+
+    /// Start a container in detached mode and return its container ID.
+    ///
+    /// Sends a `Run { detached: true }` request to the agent, which starts the
+    /// container in the background via `crun run --detach` and immediately
+    /// returns the container ID. Subsequent `machine exec` calls against the
+    /// same `persistent_overlay_id` will join this container's namespaces via
+    /// `crun exec` instead of creating a new isolated container.
+    ///
+    /// Requires `config.persistent_overlay_id` to be set — detached containers
+    /// only make sense when there is a persistent overlay to associate with.
+    pub fn run_container_detached(&mut self, config: RunConfig) -> Result<String> {
+        // Container startup involves overlay setup + crun init which can exceed
+        // the default 30s read timeout on first run (cold overlay, cold image).
+        let _timeout_guard = self.set_extended_read_timeout(Duration::from_secs(120))?;
+
+        let resp = self.request(&AgentRequest::Run {
+            image: config.image,
+            command: config.command,
+            env: config.env,
+            workdir: config.workdir,
+            user: config.user,
+            mounts: config.mounts,
+            timeout_ms: None,
+            interactive: false,
+            tty: false,
+            detached: true,
+            persistent_overlay_id: config.persistent_overlay_id,
+            background: false,
+        })?;
+        let (exit_code, stdout, _) = expect_completed(resp, "run container detached")?;
+        if exit_code != 0 {
+            return Err(Error::agent(
+                "run container detached",
+                format!("agent returned exit code {}", exit_code),
+            ));
+        }
+        String::from_utf8(stdout).map_err(|e| {
+            Error::agent(
+                "run container detached",
+                format!("invalid container ID in response: {}", e),
+            )
+        })
     }
 
     /// Send stdin data to a running interactive command.
