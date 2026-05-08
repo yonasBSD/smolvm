@@ -2603,6 +2603,114 @@ run_test "Prune --all: refuses on running VM" test_prune_all_refuses_on_running_
 run_test "Prune --all: removes cached images" test_prune_all_removes_images || true
 
 # =============================================================================
+# Stdout Backpressure Test
+#
+# Regression: image-backed exec deadlocked when stdout exceeded the OS pipe
+# buffer (~64KB). The agent waited for crun to exit before reading pipes,
+# but crun blocked on write() because the pipe was full. Background pipe
+# draining threads fix this.
+# =============================================================================
+
+test_exec_large_stdout_does_not_crash_vm() {
+    ensure_machine_running "true"
+
+    # Generate 128KB of output — well above the ~64KB pipe buffer
+    local output
+    output=$(run_with_timeout 30 $SMOLVM machine exec -- sh -c 'dd if=/dev/urandom bs=1024 count=128 2>/dev/null | base64' 2>&1)
+    local exit_code=$?
+
+    [[ $exit_code -eq 124 ]] && { echo "FAIL: timed out (pipe deadlock?)"; return 1; }
+
+    local output_size=${#output}
+    [[ $output_size -gt 100000 ]] || {
+        echo "FAIL: expected >100KB output, got ${output_size} bytes"
+        return 1
+    }
+
+    # VM must still be responsive after large output
+    local check
+    check=$(run_with_timeout 10 $SMOLVM machine exec -- echo "still-alive" 2>&1) || {
+        echo "FAIL: VM unreachable after large stdout"
+        return 1
+    }
+    echo "$check" | grep -q "still-alive" || {
+        echo "FAIL: expected 'still-alive', got: $check"
+        return 1
+    }
+}
+
+test_exec_image_large_stdout_does_not_crash_vm() {
+    # Same test but for image-backed exec (the actual bug path)
+    $SMOLVM machine stop 2>/dev/null || true
+    $SMOLVM machine delete default -f 2>/dev/null || true
+    $SMOLVM machine create --net --image alpine default 2>&1 || return 1
+    $SMOLVM machine start 2>&1 || return 1
+
+    local output
+    output=$(run_with_timeout 30 $SMOLVM machine exec -- sh -c 'dd if=/dev/urandom bs=1024 count=128 2>/dev/null | base64' 2>&1)
+    local exit_code=$?
+
+    [[ $exit_code -eq 124 ]] && { echo "FAIL: timed out (pipe deadlock?)"; return 1; }
+
+    local output_size=${#output}
+    [[ $output_size -gt 100000 ]] || {
+        echo "FAIL: expected >100KB output, got ${output_size} bytes"
+        return 1
+    }
+
+    # VM must still respond
+    local check
+    check=$(run_with_timeout 10 $SMOLVM machine exec -- echo "still-alive" 2>&1) || {
+        echo "FAIL: VM unreachable after large stdout (image-backed exec)"
+        return 1
+    }
+    echo "$check" | grep -q "still-alive" || {
+        echo "FAIL: expected 'still-alive', got: $check"
+        return 1
+    }
+
+    $SMOLVM machine stop 2>/dev/null || true
+    $SMOLVM machine delete default -f 2>/dev/null || true
+}
+
+test_exec_joined_large_stdout_does_not_crash_vm() {
+    # Same test but through the joined crun exec path (detached main container)
+    $SMOLVM machine stop 2>/dev/null || true
+    $SMOLVM machine delete default -f 2>/dev/null || true
+    $SMOLVM machine run -d --net --image alpine -- sleep 300 2>&1 || return 1
+
+    local output
+    output=$(run_with_timeout 30 $SMOLVM machine exec -- sh -c 'dd if=/dev/urandom bs=1024 count=128 2>/dev/null | base64' 2>&1)
+    local exit_code=$?
+
+    [[ $exit_code -eq 124 ]] && { echo "FAIL: timed out (pipe deadlock in joined exec?)"; return 1; }
+
+    local output_size=${#output}
+    [[ $output_size -gt 100000 ]] || {
+        echo "FAIL: expected >100KB output, got ${output_size} bytes"
+        return 1
+    }
+
+    # VM and main container must still be responsive
+    local check
+    check=$(run_with_timeout 10 $SMOLVM machine exec -- echo "still-alive" 2>&1) || {
+        echo "FAIL: VM unreachable after large stdout via joined exec"
+        return 1
+    }
+    echo "$check" | grep -q "still-alive" || {
+        echo "FAIL: expected 'still-alive', got: $check"
+        return 1
+    }
+
+    $SMOLVM machine stop 2>/dev/null || true
+    $SMOLVM machine delete default -f 2>/dev/null || true
+}
+
+run_test "Exec: large stdout does not crash VM (bare)" test_exec_large_stdout_does_not_crash_vm || true
+run_test "Exec: large stdout does not crash VM (image-backed)" test_exec_image_large_stdout_does_not_crash_vm || true
+run_test "Exec: large stdout does not crash VM (joined exec)" test_exec_joined_large_stdout_does_not_crash_vm || true
+
+# =============================================================================
 # Exec-Join Container Tests
 #
 # Verifies that `machine exec` joins the running main workload container via

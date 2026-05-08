@@ -10,6 +10,16 @@ use std::time::{Duration, Instant};
 /// Exit code used when a command is killed due to timeout.
 pub const TIMEOUT_EXIT_CODE: i32 = 124;
 
+/// Per-stream output cap for non-interactive exec. Vec<u8> is base64-encoded
+/// in JSON frames (4/3 expansion). Two streams at this cap must fit within the
+/// 32 MB frame limit with room for JSON overhead:
+///   11 MiB × 2 × 4/3 ≈ 29.3 MiB encoded + ~2.7 MiB JSON headroom.
+pub const MAX_EXEC_OUTPUT: usize = 11 * 1024 * 1024;
+
+/// Maximum time to wait for reader threads to finish after the child is killed.
+/// Guards against pathological cases where an inherited fd keeps a pipe open.
+const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// Captured output from a child process.
 #[derive(Debug, Default)]
 pub struct ChildOutput {
@@ -182,6 +192,12 @@ where
 /// requesting client disconnects (indicated by `client_fd`, which is polled
 /// each iteration).
 ///
+/// Stdout and stderr are drained concurrently in background threads to prevent
+/// pipe deadlock: if the child writes more than the OS pipe buffer (~64KB),
+/// it blocks on write() while the agent blocks waiting for exit — neither side
+/// makes progress. The background threads consume pipe data continuously,
+/// preventing backpressure from stalling the child.
+///
 /// The client-disconnect check is the short-term mitigation for BUG-12/20:
 /// when the host-side exec client is SIGTERM'd or times out, the agent's
 /// accept loop was left blocked on the still-running child. Now we kill the
@@ -196,41 +212,147 @@ pub fn wait_with_timeout_cleanup_and_liveness<F>(
 where
     F: FnOnce(),
 {
+    use std::sync::mpsc;
+
+    const CHUNK_SIZE: usize = 64 * 1024;
+
+    // Drain stdout/stderr in background threads BEFORE waiting for exit.
+    // Threads send chunks via channels so the parent accumulates data
+    // incrementally. On timeout/disconnect, already-received chunks are
+    // preserved even if the reader thread is still blocked on a pipe that
+    // hasn't reached EOF (e.g., background process inherited stdio).
+    let (stdout_tx, stdout_rx) = mpsc::channel::<Vec<u8>>();
+    let (stderr_tx, stderr_rx) = mpsc::channel::<Vec<u8>>();
+
+    let stdout_handle = child.stdout.take().and_then(|mut out| {
+        std::thread::Builder::new()
+            .name("crun-stdout".into())
+            .spawn(move || {
+                let mut total = 0usize;
+                loop {
+                    let mut chunk = vec![0u8; CHUNK_SIZE];
+                    match out.read(&mut chunk) {
+                        Ok(0) => break, // EOF
+                        Ok(n) => {
+                            total += n;
+                            chunk.truncate(n);
+                            if stdout_tx.send(chunk).is_err() {
+                                break; // receiver dropped
+                            }
+                            if total >= MAX_EXEC_OUTPUT {
+                                break; // cap reached
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .ok()
+    });
+
+    let stderr_handle = child.stderr.take().and_then(|mut err| {
+        std::thread::Builder::new()
+            .name("crun-stderr".into())
+            .spawn(move || {
+                let mut total = 0usize;
+                loop {
+                    let mut chunk = vec![0u8; CHUNK_SIZE];
+                    match err.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            total += n;
+                            chunk.truncate(n);
+                            if stderr_tx.send(chunk).is_err() {
+                                break;
+                            }
+                            if total >= MAX_EXEC_OUTPUT {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            })
+            .ok()
+    });
+
+    // Accumulated output — grows as reader threads send chunks.
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+
     let poll_interval = Duration::from_millis(10);
     let deadline = timeout_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
 
+    // Drain any available chunks from the channels into local buffers.
+    let drain_channels = |stdout_rx: &mpsc::Receiver<Vec<u8>>,
+                          stderr_rx: &mpsc::Receiver<Vec<u8>>,
+                          stdout_buf: &mut Vec<u8>,
+                          stderr_buf: &mut Vec<u8>| {
+        for chunk in stdout_rx.try_iter() {
+            stdout_buf.extend_from_slice(&chunk);
+        }
+        for chunk in stderr_rx.try_iter() {
+            stderr_buf.extend_from_slice(&chunk);
+        }
+    };
+
     loop {
+        // Drain available chunks each iteration so local buffers stay current.
+        drain_channels(&stdout_rx, &stderr_rx, &mut stdout_buf, &mut stderr_buf);
+
         match try_wait_with_eintr(child) {
             Ok(Some(status)) => {
-                let output = capture_child_output(child);
+                // Child exited — give reader threads a bounded window to finish.
+                // After the child dies, pipe write ends close and readers see EOF.
+                // Use is_finished() on handles to detect completion without consuming
+                // chunks (try_recv as a probe races and can drop data).
+                let join_deadline = Instant::now() + READER_JOIN_TIMEOUT;
+                while Instant::now() < join_deadline {
+                    drain_channels(&stdout_rx, &stderr_rx, &mut stdout_buf, &mut stderr_buf);
+                    let stdout_done = stdout_handle.as_ref().map_or(true, |h| h.is_finished());
+                    let stderr_done = stderr_handle.as_ref().map_or(true, |h| h.is_finished());
+                    if stdout_done && stderr_done {
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                // Final drain after threads are done (or timed out).
+                drain_channels(&stdout_rx, &stderr_rx, &mut stdout_buf, &mut stderr_buf);
                 let exit_code = status.code().unwrap_or(-1);
-                return Ok(WaitResult::Completed { exit_code, output });
+                return Ok(WaitResult::Completed {
+                    exit_code,
+                    output: ChildOutput {
+                        stdout: stdout_buf,
+                        stderr: stderr_buf,
+                    },
+                });
             }
             Ok(None) => {
-                // Client disconnected — kill the child and return early so
-                // the accept loop can move on to the next request.
                 if let Some(fd) = client_fd {
                     if is_peer_closed(fd) {
                         let _ = child.kill();
                         let _ = child.wait();
-                        let output = capture_child_output(child);
-                        return Ok(WaitResult::ClientDisconnected { output });
+                        drain_channels(&stdout_rx, &stderr_rx, &mut stdout_buf, &mut stderr_buf);
+                        return Ok(WaitResult::ClientDisconnected {
+                            output: ChildOutput {
+                                stdout: stdout_buf,
+                                stderr: stderr_buf,
+                            },
+                        });
                     }
                 }
 
                 if let Some(deadline) = deadline {
                     if Instant::now() >= deadline {
-                        // Call custom cleanup before killing
                         on_timeout();
-
-                        // Kill the process
                         let _ = child.kill();
                         let _ = child.wait();
-
-                        let output = capture_child_output(child);
-
+                        drain_channels(&stdout_rx, &stderr_rx, &mut stdout_buf, &mut stderr_buf);
                         return Ok(WaitResult::TimedOut {
-                            output,
+                            output: ChildOutput {
+                                stdout: stdout_buf,
+                                stderr: stderr_buf,
+                            },
                             timeout_ms: timeout_ms.unwrap_or(0),
                         });
                     }

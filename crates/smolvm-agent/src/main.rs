@@ -4259,7 +4259,7 @@ fn handle_vm_exec(
     // write() while the agent blocks waiting for the child to exit — neither
     // side makes progress. See docs/exec-streaming-unification.md for the
     // long-term fix (streaming exec).
-    const MAX_OUTPUT: usize = 16 * 1024 * 1024;
+    const MAX_OUTPUT: usize = crate::process::MAX_EXEC_OUTPUT;
 
     // Use read_to_end (not read_to_string) so binary output (image bytes,
     // tarballs, any non-UTF-8 data) is preserved through the protocol.
