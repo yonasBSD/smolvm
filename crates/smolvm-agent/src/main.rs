@@ -155,6 +155,16 @@ fn main() {
     // This does overlayfs + pivot_root before anything else touches the filesystem.
     setup_persistent_rootfs();
 
+    // Start seatd AFTER pivot_root so its socket lands at /run/seatd.sock in
+    // the live root. Wayland compositors (Weston, sway) and DRI3-capable X
+    // servers (Xwayland) connect to this socket via libseat to acquire DRM
+    // devices. Without seatd, GPU-accelerated display workloads fail with
+    // "No backend was able to open a seat."
+    #[cfg(target_os = "linux")]
+    if std::env::var(ENV_SMOLVM_GPU).as_deref() == Ok(ENV_VALUE_ON) {
+        start_seatd();
+    }
+
     // CRITICAL: Create vsock listener IMMEDIATELY after mounts.
     // This must happen before logging setup to minimize time to listener ready.
     // The kernel boots in ~30ms and host connects immediately after.
@@ -528,6 +538,49 @@ fn setup_gpu_dev_nodes() {
                 libc::S_IFCHR | 0o666,
                 libc::makedev(major, minor),
             );
+        }
+    }
+}
+
+/// Start the seatd seat manager daemon.
+///
+/// seatd provides the seat management API that Wayland compositors (Weston, sway)
+/// and DRI3-capable X servers (Xwayland) need to access /dev/dri devices.
+/// Without it, GPU-accelerated display workloads fail with:
+///   "No backend was able to open a seat"
+///
+/// seatd runs as a background daemon on a Unix socket at /run/seatd.sock.
+/// It's only started when GPU is enabled — zero overhead otherwise.
+#[cfg(target_os = "linux")]
+fn start_seatd() {
+    use std::process::{Command, Stdio};
+
+    let seatd_path = "/usr/bin/seatd";
+    if !std::path::Path::new(seatd_path).exists() {
+        boot_log(
+            "WARN",
+            "seatd not found in rootfs, GPU display workloads may fail",
+        );
+        return;
+    }
+
+    // seatd needs /run for its socket
+    let _ = std::fs::create_dir_all("/run");
+
+    match Command::new(seatd_path)
+        .args(["-g", "root"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(child) => {
+            boot_log("INFO", &format!("seatd started (PID {})", child.id()));
+            // Detach — seatd runs for the lifetime of the VM
+            std::mem::forget(child);
+        }
+        Err(e) => {
+            boot_log("WARN", &format!("failed to start seatd: {}", e));
         }
     }
 }
