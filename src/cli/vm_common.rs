@@ -669,35 +669,50 @@ pub fn start_vm_named(name: &str) -> smolvm::Result<()> {
     // would hit the bare Alpine agent and fail with "not found".
     let mut client = smolvm::agent::AgentClient::connect_with_retry(manager.vsock_socket())?;
 
-    let image_info = if record.source_smolmachine.is_some() {
-        // Layers already mounted via virtiofs — no pull needed.
-        None
-    } else if let Some(ref image) = record.image {
-        println!("Pulling {}...", image);
-        Some(crate::cli::pull_with_progress(&mut client, image, None)?)
-    } else {
-        None
-    };
+    // On first boot, pull the image and run init commands. On subsequent
+    // starts, skip both — image manifests/layers persist on the storage disk
+    // and the container overlay is remounted (not recreated).
+    if !record.init_completed {
+        let image_info = if record.source_smolmachine.is_some() {
+            // Layers already mounted via virtiofs — no pull needed.
+            None
+        } else if let Some(ref image) = record.image {
+            println!("Pulling {}...", image);
+            Some(crate::cli::pull_with_progress(&mut client, image, None)?)
+        } else {
+            None
+        };
 
-    // Run init commands if configured (before reporting success).
-    // `run_init_commands` branches on image: container path for
-    // image-based VMs, bare-agent path for plain VMs.
-    if let Err(e) = run_init_commands(
-        &mut client,
-        &record.init,
-        InitRunContext {
-            image: record.image.as_deref(),
-            image_info: image_info.as_ref(),
-            env: &record.env,
-            workdir: record.workdir.as_deref(),
-            record_mounts: &record.mounts,
-            overlay_id: name,
-        },
-    ) {
-        if let Err(stop_err) = manager.stop() {
-            tracing::warn!(error = %stop_err, "failed to stop machine after init failure");
+        if let Err(e) = run_init_commands(
+            &mut client,
+            &record.init,
+            InitRunContext {
+                image: record.image.as_deref(),
+                image_info: image_info.as_ref(),
+                env: &record.env,
+                workdir: record.workdir.as_deref(),
+                record_mounts: &record.mounts,
+                overlay_id: name,
+            },
+        ) {
+            if let Err(stop_err) = manager.stop() {
+                tracing::warn!(error = %stop_err, "failed to stop machine after init failure");
+            }
+            return Err(e);
         }
-        return Err(e);
+
+        // Mark init as completed so subsequent starts skip pull + init.
+        // Done before workload start so a CMD failure doesn't re-trigger init.
+        if !record.init.is_empty() || record.image.is_some() {
+            let _ = db.update_vm(name, |r| {
+                r.init_completed = true;
+            });
+        }
+    } else if !record.init.is_empty() {
+        println!(
+            "Init already completed, skipping {} command(s)",
+            record.init.len()
+        );
     }
 
     if let Some(ref img) = record.image {
@@ -794,6 +809,7 @@ pub fn persist_named_running(
                 r.overlay_gb = o.overlay_gb;
                 r.allowed_cidrs = o.allowed_cidrs.clone();
                 r.init = o.init.clone();
+                r.init_completed = false;
                 r.env = o.env.clone();
                 r.workdir = o.workdir.clone();
                 r.image = o.image.clone();

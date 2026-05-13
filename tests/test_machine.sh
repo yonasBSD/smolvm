@@ -3129,4 +3129,47 @@ test_ephemeral_volume_mount_reflects_host() {
 run_test "Ephemeral run: no state leaks between runs" test_ephemeral_runs_do_not_share_state || true
 run_test "Ephemeral run: volume mount shows correct host contents" test_ephemeral_volume_mount_reflects_host || true
 
+# =============================================================================
+# Init Skip on Restart
+# =============================================================================
+
+test_init_skipped_on_restart() {
+    local vm_name="init-skip-$$"
+
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+
+    # Create with init command and start — first boot should run init
+    $SMOLVM machine create "$vm_name" --net --init "echo INIT_RAN" 2>&1
+    local first_start
+    first_start=$($SMOLVM machine start --name "$vm_name" 2>&1)
+    echo "$first_start"
+
+    if [[ "$first_start" != *"Running 1 init command"* ]]; then
+        echo "FAIL: first start should run init"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    fi
+
+    # Stop and restart — should skip init
+    $SMOLVM machine stop --name "$vm_name" 2>&1
+    local second_start
+    second_start=$($SMOLVM machine start --name "$vm_name" 2>&1)
+    echo "$second_start"
+
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+
+    if [[ "$second_start" == *"Running"*"init command"* ]]; then
+        echo "FAIL: second start should NOT re-run init"
+        return 1
+    fi
+    if [[ "$second_start" != *"Init already completed"* ]]; then
+        echo "FAIL: second start should print skip message"
+        return 1
+    fi
+}
+
+run_test "Init: skipped on restart after first successful run" test_init_skipped_on_restart || true
+
 print_summary "Machine Tests"
