@@ -255,39 +255,46 @@ pub fn init_packed_layers() -> Option<PathBuf> {
     }
 
     // Mount virtiofs using direct syscall (avoids ~3-5ms fork+exec overhead)
-    let src = std::ffi::CString::new(tag).ok()?;
-    let dst = std::ffi::CString::new(mount_point.to_str()?).ok()?;
-    let fstype = std::ffi::CString::new("virtiofs").unwrap();
-    // SAFETY: mount virtiofs with valid CString arguments
-    let rc = unsafe {
-        libc::mount(
-            src.as_ptr(),
-            dst.as_ptr(),
-            fstype.as_ptr(),
-            0,
-            std::ptr::null(),
-        )
-    };
+    #[cfg(target_os = "linux")]
+    {
+        let src = std::ffi::CString::new(tag).ok()?;
+        let dst = std::ffi::CString::new(mount_point.to_str()?).ok()?;
+        let fstype = std::ffi::CString::new("virtiofs").unwrap();
+        // SAFETY: mount virtiofs with valid CString arguments
+        let rc = unsafe {
+            libc::mount(
+                src.as_ptr(),
+                dst.as_ptr(),
+                fstype.as_ptr(),
+                0,
+                std::ptr::null(),
+            )
+        };
 
-    if rc != 0 {
-        let err = std::io::Error::last_os_error();
-        warn!(error = %err, tag = %tag, "failed to mount packed layers virtiofs");
-        return None;
+        if rc != 0 {
+            let err = std::io::Error::last_os_error();
+            warn!(error = %err, tag = %tag, "failed to mount packed layers virtiofs");
+            return None;
+        }
+        info!(mount_point = %mount_point.display(), "packed layers mounted successfully");
+
+        // List contents for debugging (only at debug level to avoid boot overhead)
+        if let Ok(entries) = std::fs::read_dir(&mount_point) {
+            let layer_dirs: Vec<_> = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| e.path().is_dir())
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .collect();
+            debug!(layer_count = layer_dirs.len(), layers = ?layer_dirs, "packed layers available");
+        }
+
+        Some(mount_point)
     }
-
-    info!(mount_point = %mount_point.display(), "packed layers mounted successfully");
-
-    // List contents for debugging (only at debug level to avoid boot overhead)
-    if let Ok(entries) = std::fs::read_dir(&mount_point) {
-        let layer_dirs: Vec<_> = entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().to_string())
-            .collect();
-        debug!(layer_count = layer_dirs.len(), layers = ?layer_dirs, "packed layers available");
+    #[cfg(not(target_os = "linux"))]
+    {
+        warn!("packed layers mount not supported on non-Linux");
+        None
     }
-
-    Some(mount_point)
 }
 
 /// Get the packed layers directory if available.
@@ -1879,8 +1886,10 @@ fn prepare_overlay_from_packed(
         .map(|path| path.display().to_string())
         .collect();
 
-    // Use shared overlay setup logic
-    OverlaySetup::new(workload_id)?.execute(lowerdirs)
+    // Use shared overlay setup logic — execute_or_remount preserves the
+    // upper layer from a previous session (e.g., packages installed via exec)
+    // instead of recreating the overlay from scratch.
+    OverlaySetup::new(workload_id)?.execute_or_remount(lowerdirs)
 }
 
 /// Build lowerdir list from a pulled OCI image's layers.
@@ -2258,6 +2267,7 @@ pub fn setup_mounts(rootfs: &str, mounts: &[(String, String, bool)]) -> Result<(
 }
 
 /// Setup volume mounts by mounting virtiofs and bind-mounting into the rootfs.
+#[cfg(target_os = "linux")]
 fn setup_volume_mounts(rootfs: &str, mounts: &[(String, String, bool)]) -> Result<Vec<PathBuf>> {
     let mut mounted_paths = Vec::new();
     let rootfs_path = Path::new(rootfs);
@@ -2364,7 +2374,12 @@ fn setup_volume_mounts(rootfs: &str, mounts: &[(String, String, bool)]) -> Resul
     Ok(mounted_paths)
 }
 
-/// Check if a path is a mountpoint.
+/// Stub for non-Linux platforms.
+#[cfg(not(target_os = "linux"))]
+fn setup_volume_mounts(_rootfs: &str, _mounts: &[(String, String, bool)]) -> Result<Vec<PathBuf>> {
+    Ok(Vec::new())
+}
+
 /// Check if a path is a mountpoint (delegates to paths::is_mount_point).
 fn is_mountpoint(path: &Path) -> bool {
     paths::is_mount_point(path)

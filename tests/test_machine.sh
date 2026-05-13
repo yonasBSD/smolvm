@@ -1524,7 +1524,7 @@ test_machine_images() {
     $SMOLVM machine start --name default 2>/dev/null || true
 
     local output
-    output=$($SMOLVM machine images 2>&1)
+    output=$($SMOLVM machine images --name default 2>&1)
 
     $SMOLVM machine stop 2>/dev/null || true
     $SMOLVM machine delete default -f 2>/dev/null || true
@@ -1540,7 +1540,7 @@ test_machine_prune_dry_run() {
     $SMOLVM machine start --name default 2>/dev/null || true
 
     local output
-    output=$($SMOLVM machine prune --dry-run 2>&1)
+    output=$($SMOLVM machine prune --name default --dry-run 2>&1)
 
     $SMOLVM machine stop 2>/dev/null || true
     $SMOLVM machine delete default -f 2>/dev/null || true
@@ -2192,7 +2192,72 @@ echo ""
 echo "--- File I/O (machine cp) ---"
 echo ""
 
+test_cp_preserves_state_on_packed_vm() {
+    local vm_name="cp-pack-$$"
+    local pack_dir
+    pack_dir=$(mktemp -d)
+
+    # Create source VM, write marker, pack it
+    $SMOLVM machine create "cp-pack-src-$$" --image alpine:latest --net 2>&1 || return 1
+    $SMOLVM machine start --name "cp-pack-src-$$" 2>&1 || {
+        $SMOLVM machine delete "cp-pack-src-$$" -f 2>/dev/null; return 1
+    }
+    $SMOLVM machine exec --name "cp-pack-src-$$" -- sh -c 'echo marker > /etc/pack-marker' 2>&1
+    $SMOLVM machine stop --name "cp-pack-src-$$" 2>&1
+    $SMOLVM pack create --from-vm "cp-pack-src-$$" -o "$pack_dir/packed" 2>&1 || {
+        $SMOLVM machine delete "cp-pack-src-$$" -f 2>/dev/null; rm -rf "$pack_dir"; return 1
+    }
+    $SMOLVM machine delete "cp-pack-src-$$" -f 2>/dev/null
+
+    # Create destination from pack, start, mutate via exec
+    $SMOLVM machine create "$vm_name" --from "$pack_dir/packed.smolmachine" --net 2>&1 || {
+        rm -rf "$pack_dir"; return 1
+    }
+    $SMOLVM machine start --name "$vm_name" 2>&1 || {
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$pack_dir"; return 1
+    }
+    $SMOLVM machine exec --name "$vm_name" -- adduser -D alice 2>&1
+
+    # Verify alice exists before cp
+    local before
+    before=$($SMOLVM machine exec --name "$vm_name" -- id alice 2>&1) || {
+        echo "alice not found before cp"; $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$pack_dir"; return 1
+    }
+
+    # Run cp
+    echo "probe" > "$pack_dir/probe.txt"
+    $SMOLVM machine cp "$pack_dir/probe.txt" "$vm_name":/tmp/probe.txt 2>&1 || {
+        echo "cp failed"; $SMOLVM machine delete "$vm_name" -f 2>/dev/null; rm -rf "$pack_dir"; return 1
+    }
+
+    # Verify alice STILL exists after cp
+    local after
+    after=$($SMOLVM machine exec --name "$vm_name" -- id alice 2>&1) || {
+        echo "FAIL: alice gone after cp"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+        rm -rf "$pack_dir"
+        return 1
+    }
+
+    # Verify probe file landed
+    local probe
+    probe=$($SMOLVM machine exec --name "$vm_name" -- cat /tmp/probe.txt 2>&1)
+    [[ "$probe" == *"probe"* ]] || {
+        echo "FAIL: probe file missing after cp"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+        rm -rf "$pack_dir"
+        return 1
+    }
+
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null
+    rm -rf "$pack_dir"
+}
+
 run_test "File upload and download" test_file_upload_download || true
+run_test "File cp preserves state on packed VM" test_cp_preserves_state_on_packed_vm || true
 
 # =============================================================================
 # Streaming Exec
@@ -2347,7 +2412,7 @@ assert_vm_stays_running() {
 }
 
 test_images_does_not_stop_running_vm() {
-    assert_vm_stays_running "machine images" $SMOLVM machine images
+    assert_vm_stays_running "machine images" $SMOLVM machine images --name default
 }
 
 test_prune_on_running_vm() {
@@ -2359,7 +2424,7 @@ test_prune_on_running_vm() {
 
     # Regular prune should work without stopping the VM
     local output
-    output=$($SMOLVM machine prune 2>&1) || true
+    output=$($SMOLVM machine prune --name default 2>&1) || true
     [[ "$output" == *"unreferenced"* ]] || [[ "$output" == *"No unreferenced"* ]] || {
         echo "unexpected prune output: $output"
         return 1
@@ -2374,7 +2439,7 @@ test_prune_dry_run_on_running_vm() {
     ensure_machine_running
 
     local output
-    output=$($SMOLVM machine prune --dry-run 2>&1) || true
+    output=$($SMOLVM machine prune --name default --dry-run 2>&1) || true
     [[ "$output" == *"unreferenced"* ]] || [[ "$output" == *"No unreferenced"* ]] || {
         echo "unexpected prune --dry-run output: $output"
         return 1
@@ -2395,9 +2460,9 @@ test_prune_all_refuses_on_running_vm() {
 
     # --all should refuse while the VM is running
     local output exit_code=0
-    output=$($SMOLVM machine prune --all 2>&1) || exit_code=$?
+    output=$($SMOLVM machine prune --name default --all 2>&1) || exit_code=$?
     [[ $exit_code -ne 0 ]] || { echo "prune --all should have failed on running VM"; return 1; }
-    [[ "$output" == *"cannot prune --all while the machine is running"* ]] || {
+    [[ "$output" == *"cannot prune --all while machine"* ]] || {
         echo "unexpected error: $output"
         return 1
     }
@@ -2422,14 +2487,14 @@ test_prune_all_removes_images() {
 
     # Check images before prune
     local images_before
-    images_before=$($SMOLVM machine images 2>&1)
+    images_before=$($SMOLVM machine images --name default 2>&1)
 
-    # Stop the VM (prune requires it)
+    # Stop the VM (prune --all requires it)
     $SMOLVM machine stop 2>&1
 
     # Run prune --all
     local output
-    output=$($SMOLVM machine prune --all 2>&1) || {
+    output=$($SMOLVM machine prune --name default --all 2>&1) || {
         echo "prune --all failed: $output"
         $SMOLVM machine delete default -f 2>/dev/null
         return 1
@@ -2447,7 +2512,7 @@ test_prune_all_removes_images() {
     }
 
     local images_after
-    images_after=$($SMOLVM machine images 2>&1)
+    images_after=$($SMOLVM machine images --name default 2>&1)
 
     $SMOLVM machine stop 2>/dev/null || true
     $SMOLVM machine delete default -f 2>/dev/null || true
@@ -3128,5 +3193,48 @@ test_ephemeral_volume_mount_reflects_host() {
 
 run_test "Ephemeral run: no state leaks between runs" test_ephemeral_runs_do_not_share_state || true
 run_test "Ephemeral run: volume mount shows correct host contents" test_ephemeral_volume_mount_reflects_host || true
+
+# =============================================================================
+# Init Skip on Restart
+# =============================================================================
+
+test_init_skipped_on_restart() {
+    local vm_name="init-skip-$$"
+
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+
+    # Create with init command and start — first boot should run init
+    $SMOLVM machine create "$vm_name" --net --init "echo INIT_RAN" 2>&1
+    local first_start
+    first_start=$($SMOLVM machine start --name "$vm_name" 2>&1)
+    echo "$first_start"
+
+    if [[ "$first_start" != *"Running 1 init command"* ]]; then
+        echo "FAIL: first start should run init"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    fi
+
+    # Stop and restart — should skip init
+    $SMOLVM machine stop --name "$vm_name" 2>&1
+    local second_start
+    second_start=$($SMOLVM machine start --name "$vm_name" 2>&1)
+    echo "$second_start"
+
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+
+    if [[ "$second_start" == *"Running"*"init command"* ]]; then
+        echo "FAIL: second start should NOT re-run init"
+        return 1
+    fi
+    if [[ "$second_start" != *"Init already completed"* ]]; then
+        echo "FAIL: second start should print skip message"
+        return 1
+    fi
+}
+
+run_test "Init: skipped on restart after first successful run" test_init_skipped_on_restart || true
 
 print_summary "Machine Tests"

@@ -382,9 +382,14 @@ pub struct VmRecord {
     #[serde(default)]
     pub last_exit_code: Option<i32>,
 
-    /// Commands to run on every VM start (via `sh -c`).
+    /// Commands to run on first VM start (via `sh -c`).
     #[serde(default)]
     pub init: Vec<String>,
+
+    /// Whether init commands have already completed successfully.
+    /// Set to true after first successful run; reset when init commands change.
+    #[serde(default)]
+    pub init_completed: bool,
 
     /// Environment variables for init commands.
     #[serde(default)]
@@ -496,6 +501,7 @@ impl VmRecord {
             restart: RestartConfig::default(),
             last_exit_code: None,
             init: Vec::new(),
+            init_completed: false,
             env: Vec::new(),
             workdir: None,
             storage_gb: None,
@@ -543,6 +549,7 @@ impl VmRecord {
             restart,
             last_exit_code: None,
             init: Vec::new(),
+            init_completed: false,
             env: Vec::new(),
             workdir: None,
             storage_gb: None,
