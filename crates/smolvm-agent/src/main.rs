@@ -843,8 +843,19 @@ fn setup_persistent_rootfs() {
     let overlay_src = cstr("overlay");
     let newroot = cstr(NEWROOT);
     let overlay_type = cstr("overlay");
+    // index=on: enables the overlayfs index dir for stable file handle tracking across
+    //   copy-up operations (prevents stale handles after writes to lower-layer files).
+    // redirect_dir=on: enables redirect xattrs so cross-directory renames work correctly
+    //   on the upper layer without corrupting the lower layer view.
+    // uuid=on: stores a stable UUID in the upper dir for consistent inode numbering.
+    //
+    // Note: these options do NOT enable Docker overlay2 stacking on the rootfs overlay.
+    // The rootfs overlay's lower layer is the initramfs (ramfs), which has no file-handle
+    // support. The kernel falls back to index=off for any overlay whose upper/work dir sits
+    // on this rootfs overlay, making it unusable as a Docker overlay2 upper dir regardless
+    // of these options. Docker's data root must be bind-mounted to ext4 (/storage/).
     let overlay_opts = cstr(&format!(
-        "lowerdir=/,upperdir={}/upper,workdir={}/work",
+        "index=on,redirect_dir=on,uuid=on,lowerdir=/,upperdir={}/upper,workdir={}/work",
         OVERLAY_MOUNT, OVERLAY_MOUNT
     ));
     // SAFETY: mount overlayfs with the specified options

@@ -3237,4 +3237,239 @@ test_init_skipped_on_restart() {
 
 run_test "Init: skipped on restart after first successful run" test_init_skipped_on_restart || true
 
+# =============================================================================
+# Docker-in-VM
+#
+# Verifies that Docker Engine runs correctly inside a bare smolvm machine using
+# the production docker.smolfile from examples/docker-in-vm/.
+#
+# What this covers:
+#   - overlay2 storage driver works (via ext4 bind-mount — required because the
+#     rootfs overlay's ramfs lower has no file-handle support)
+#   - /var/lib/docker is correctly bind-mounted to /dev/vda (ext4)
+#   - `docker run` executes a container
+#   - Docker bridge networking reaches the internet
+#   - `docker build` produces a working image
+#   - Stop → start cycle: init is skipped, bind-mount must be re-applied
+#   - Pulled and built images persist across VM restarts
+# =============================================================================
+
+# Start dockerd inside the named docker machine.
+# Caller must already have the machine running.
+# Prints dockerd startup status; returns non-zero if dockerd never becomes ready.
+_docker_in_vm_start_dockerd() {
+    local vm_name="$1"
+    $SMOLVM machine exec --name "$vm_name" -- sh -c '
+        mkdir -p /storage/docker /var/lib/docker
+        mount --bind /storage/docker /var/lib/docker
+        rm -f /var/run/docker.pid
+        dockerd --storage-driver=overlay2 >/tmp/dockerd.log 2>&1 &
+        for i in $(seq 1 40); do
+            docker info >/dev/null 2>&1 && echo "dockerd-ready" && exit 0
+            sleep 1
+        done
+        echo "FAIL: dockerd did not become ready"
+        tail -5 /tmp/dockerd.log
+        exit 1
+    ' 2>&1
+}
+
+test_docker_in_vm() {
+    local vm_name="docker-in-vm-$$"
+    local smolfile="$PROJECT_ROOT/examples/docker-in-vm/docker.smolfile"
+
+    echo "phase: pre-cleanup"
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+
+    # ── Create ────────────────────────────────────────────────────────────────
+    echo "phase: create"
+    local output
+    output=$($SMOLVM machine create "$vm_name" \
+        -s "$smolfile" --net-backend virtio-net 2>&1) || {
+        echo "FAIL: machine create failed"
+        echo "$output"
+        return 1
+    }
+    [[ "$output" == *"Init commands: 4"* ]] || {
+        echo "FAIL: expected 4 init commands, got: $output"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    # ── First start (runs init: apk add docker + bind-mount) ─────────────────
+    echo "phase: first-start (apk add docker — expect 30-90s)"
+    output=$($SMOLVM machine start --name "$vm_name" 2>&1) || {
+        echo "FAIL: first machine start failed"
+        echo "$output"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *"Running 4 init command"* ]] || {
+        echo "FAIL: expected 4 init commands to run on first start"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    # ── Start dockerd ─────────────────────────────────────────────────────────
+    echo "phase: start-dockerd"
+    output=$(_docker_in_vm_start_dockerd "$vm_name") || {
+        echo "FAIL: dockerd failed to start"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *"dockerd-ready"* ]] || {
+        echo "FAIL: dockerd did not report ready"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    # ── Assert: overlay2 storage driver on ext4 ───────────────────────────────
+    echo "phase: assert-overlay2-on-ext4"
+    output=$($SMOLVM machine exec --name "$vm_name" -- sh -c '
+        driver=$(docker info 2>/dev/null | grep "Storage Driver:" | awk "{print \$3}")
+        [ "$driver" = "overlay2" ] || { echo "FAIL: storage driver=$driver"; exit 1; }
+        echo "storage-driver-ok"
+        mount | grep -q "/dev/vda on /var/lib/docker type ext4" || {
+            echo "FAIL: /var/lib/docker not on ext4"
+            mount | grep "var/lib/docker" || true
+            exit 1
+        }
+        echo "bind-mount-ok"
+    ' 2>&1) || {
+        echo "FAIL: storage driver or bind-mount check failed"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *"storage-driver-ok"* ]] || { echo "FAIL: $output"; $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true; $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true; return 1; }
+    [[ "$output" == *"bind-mount-ok"* ]]    || { echo "FAIL: $output"; $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true; $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true; return 1; }
+
+    # ── Assert: docker run executes a container ───────────────────────────────
+    echo "phase: docker-run"
+    output=$($SMOLVM machine exec --name "$vm_name" -- \
+        docker run --rm alpine echo "docker-in-vm-ok" 2>&1) || {
+        echo "FAIL: docker run failed"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *"docker-in-vm-ok"* ]] || {
+        echo "FAIL: expected docker-in-vm-ok, got: $output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    # ── Assert: bridge networking reaches the internet ────────────────────────
+    echo "phase: docker-bridge-networking"
+    output=$($SMOLVM machine exec --name "$vm_name" -- \
+        docker run --rm alpine wget -qO- https://httpbin.org/get 2>&1) || {
+        echo "FAIL: docker bridge networking failed"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *'"url"'* ]] || {
+        echo "FAIL: expected JSON response with url field, got: $output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    # ── Assert: docker build produces a runnable image ────────────────────────
+    echo "phase: docker-build"
+    output=$($SMOLVM machine exec --name "$vm_name" -- sh -c '
+        printf "FROM alpine\nRUN echo build-layer-ok" > /tmp/Dockerfile
+        docker build -t smolvm-test-build /tmp 2>&1 | tail -3
+        docker run --rm smolvm-test-build echo "built-image-run-ok"
+    ' 2>&1) || {
+        echo "FAIL: docker build or run of built image failed"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *"built-image-run-ok"* ]] || {
+        echo "FAIL: expected built-image-run-ok, got: $output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    # ── Stop → restart cycle ──────────────────────────────────────────────────
+    echo "phase: stop"
+    $SMOLVM machine stop --name "$vm_name" 2>&1 || {
+        echo "FAIL: machine stop failed"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    echo "phase: restart"
+    output=$($SMOLVM machine start --name "$vm_name" 2>&1) || {
+        echo "FAIL: machine restart failed"
+        echo "$output"
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *"Init already completed"* ]] || {
+        echo "FAIL: init should be skipped on restart, got: $output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    # ── Re-start dockerd after restart ────────────────────────────────────────
+    echo "phase: start-dockerd-after-restart"
+    output=$(_docker_in_vm_start_dockerd "$vm_name") || {
+        echo "FAIL: dockerd failed to start after VM restart"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *"dockerd-ready"* ]] || {
+        echo "FAIL: dockerd not ready after VM restart"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+
+    # ── Assert: images persist across restart ─────────────────────────────────
+    echo "phase: assert-persistence"
+    output=$($SMOLVM machine exec --name "$vm_name" -- sh -c '
+        docker images | grep -q "^alpine " || { echo "FAIL: alpine image missing after restart"; docker images; exit 1; }
+        echo "alpine-persists"
+        docker images | grep -q "smolvm-test-build" || { echo "FAIL: built image missing after restart"; docker images; exit 1; }
+        echo "built-image-persists"
+        docker run --rm alpine echo "post-restart-run-ok"
+    ' 2>&1) || {
+        echo "FAIL: post-restart image persistence check failed"
+        echo "$output"
+        $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+        $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+        return 1
+    }
+    [[ "$output" == *"alpine-persists"* ]]      || { echo "FAIL: $output"; $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true; $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true; return 1; }
+    [[ "$output" == *"built-image-persists"* ]] || { echo "FAIL: $output"; $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true; $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true; return 1; }
+    [[ "$output" == *"post-restart-run-ok"* ]]  || { echo "FAIL: $output"; $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true; $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true; return 1; }
+
+    # ── Cleanup ───────────────────────────────────────────────────────────────
+    echo "phase: cleanup"
+    $SMOLVM machine stop --name "$vm_name" 2>/dev/null || true
+    $SMOLVM machine delete "$vm_name" -f 2>/dev/null || true
+}
+
+run_test "Docker-in-VM: overlay2 + bridge networking + build + restart persistence" test_docker_in_vm || true
+
 print_summary "Machine Tests"
